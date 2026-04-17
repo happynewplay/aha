@@ -23,6 +23,7 @@ pub mod qwen3vl;
 pub mod rmbg2_0;
 pub mod voxcpm;
 pub mod w2v_bert_2_0;
+pub mod yolo;
 
 use aha_openai_dive::v1::resources::chat::{
     ChatCompletionChunkResponse, ChatCompletionParameters, ChatCompletionResponse,
@@ -41,6 +42,7 @@ use crate::models::{
     qwen3_asr::generate::Qwen3AsrGenerateModel, qwen3_embedding::generate::Qwen3EmbeddingModel,
     qwen3_reranker::generate::Qwen3RerankerModel, qwen3vl::generate::Qwen3VLGenerateModel,
     rmbg2_0::generate::RMBG2_0Model, voxcpm::generate::VoxCPMGenerate,
+    yolo::generate::YoloGenerateModel,
 };
 
 pub use core::artifact::{
@@ -135,6 +137,8 @@ pub enum WhichModel {
     FunASRNano2512,
     #[value(name = "glm-ocr", hide = true)]
     GlmOCR,
+    #[value(name = "yolo11-detect")]
+    Yolo11Detect,
 }
 
 pub const LISTED_MODELS: &[WhichModel] = &[
@@ -176,6 +180,7 @@ pub const LISTED_MODELS: &[WhichModel] = &[
     WhichModel::GlmASRNano2512,
     WhichModel::FunASRNano2512,
     WhichModel::GlmOCR,
+    WhichModel::Yolo11Detect,
 ];
 
 impl WhichModel {
@@ -188,6 +193,7 @@ impl WhichModel {
             | WhichModel::Qwen3_5_0_8BLmstudioGguf
             | WhichModel::Qwen3_5_2BLmstudioGguf
             | WhichModel::Qwen3_5_4BLmstudioGguf => ModelArtifactFormat::Gguf,
+            WhichModel::Yolo11Detect => ModelArtifactFormat::Onnx,
             _ => ModelArtifactFormat::Safetensors,
         }
     }
@@ -241,6 +247,7 @@ impl WhichModel {
             WhichModel::GlmASRNano2512 => "glm-asr-nano-2512",
             WhichModel::FunASRNano2512 => "fun-asr-nano-2512",
             WhichModel::GlmOCR => "glm-ocr",
+            WhichModel::Yolo11Detect => "yolo11-detect",
         }
     }
 
@@ -280,6 +287,7 @@ impl WhichModel {
             WhichModel::VoxCPM | WhichModel::VoxCPM1_5 => "OpenBMB",
             WhichModel::GlmASRNano2512 | WhichModel::GlmOCR => "ZhipuAI",
             WhichModel::FunASRNano2512 => "FunAudioLLM",
+            WhichModel::Yolo11Detect => "Ultralytics",
         }
     }
 
@@ -325,6 +333,7 @@ impl WhichModel {
             WhichModel::GlmASRNano2512 => "ZhipuAI/GLM-ASR-Nano-2512",
             WhichModel::FunASRNano2512 => "FunAudioLLM/Fun-ASR-Nano-2512",
             WhichModel::GlmOCR => "ZhipuAI/GLM-OCR",
+            WhichModel::Yolo11Detect => "Ultralytics/YOLO11",
         }
     }
 
@@ -370,7 +379,10 @@ impl WhichModel {
             | WhichModel::GlmASRNano2512
             | WhichModel::FunASRNano2512 => "asr",
             // Image models
-            WhichModel::RMBG2_0 | WhichModel::VoxCPM | WhichModel::VoxCPM1_5 => "image",
+            WhichModel::RMBG2_0
+            | WhichModel::VoxCPM
+            | WhichModel::VoxCPM1_5
+            | WhichModel::Yolo11Detect => "image",
         }
     }
 }
@@ -408,6 +420,7 @@ pub enum ModelInstance<'a> {
     GlmASRNano(GlmAsrNanoGenerateModel<'a>),
     FunASRNano(FunAsrNanoGenerateModel),
     GlmOCR(GlmOcrGenerateModel),
+    Yolo(Box<YoloGenerateModel>),
 }
 
 impl<'a> GenerateModel for ModelInstance<'a> {
@@ -436,6 +449,7 @@ impl<'a> GenerateModel for ModelInstance<'a> {
             ModelInstance::GlmASRNano(model) => model.generate(mes),
             ModelInstance::FunASRNano(model) => model.generate(mes),
             ModelInstance::GlmOCR(model) => model.generate(mes),
+            ModelInstance::Yolo(model) => model.generate(mes),
         }
     }
 
@@ -474,6 +488,7 @@ impl<'a> GenerateModel for ModelInstance<'a> {
             ModelInstance::GlmASRNano(model) => model.generate_stream(mes),
             ModelInstance::FunASRNano(model) => model.generate_stream(mes),
             ModelInstance::GlmOCR(model) => model.generate_stream(mes),
+            ModelInstance::Yolo(model) => model.generate_stream(mes),
         }
     }
 }
@@ -635,6 +650,11 @@ pub fn load_model_legacy<'a>(
         WhichModel::GlmOCR => {
             let model = GlmOcrGenerateModel::init(path, None, None)?;
             ModelInstance::GlmOCR(model)
+        }
+        WhichModel::Yolo11Detect => {
+            return Err(anyhow!(
+                "yolo11-detect must be loaded through LoadSpec with --artifact-format onnx and --onnx-path"
+            ));
         }
     };
     Ok(model)

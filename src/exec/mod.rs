@@ -21,6 +21,7 @@ pub mod qwen3vl;
 pub mod rmbg2_0;
 pub mod voxcpm;
 pub mod voxcpm1_5;
+pub mod yolo;
 
 use anyhow::Result;
 

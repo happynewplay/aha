@@ -4,7 +4,7 @@ use crate::models::{
     ModelInstance, WhichModel, all_minilm_l6_v2::generate::AllMiniLML6V2Model,
     glm_ocr::generate::GlmOcrGenerateModel, load_model_legacy, qwen3::generate::Qwen3GenerateModel,
     qwen3_5::generate::Qwen3_5GenerateModel, qwen3_embedding::generate::Qwen3EmbeddingModel,
-    qwen3_reranker::generate::Qwen3RerankerModel,
+    qwen3_reranker::generate::Qwen3RerankerModel, yolo::generate::YoloGenerateModel,
 };
 
 use super::artifact::LoadSpec;
@@ -17,6 +17,7 @@ enum ModelLoaderFamily {
     Qwen3Embedding,
     Qwen3Reranker,
     Qwen3_5,
+    Yolo,
     Legacy,
 }
 
@@ -42,6 +43,7 @@ fn resolve_model_loader_family(model: WhichModel) -> ModelLoaderFamily {
         | WhichModel::Qwen3_5_0_8BLmstudioGguf
         | WhichModel::Qwen3_5_2BLmstudioGguf
         | WhichModel::Qwen3_5_4BLmstudioGguf => ModelLoaderFamily::Qwen3_5,
+        WhichModel::Yolo11Detect => ModelLoaderFamily::Yolo,
         _ => ModelLoaderFamily::Legacy,
     }
 }
@@ -66,6 +68,9 @@ pub fn load_model_from_spec<'a>(spec: &LoadSpec) -> Result<ModelInstance<'a>> {
         }
         ModelLoaderFamily::Qwen3_5 => {
             ModelInstance::Qwen3_5(Qwen3_5GenerateModel::init_from_spec(spec, None, None)?)
+        }
+        ModelLoaderFamily::Yolo => {
+            ModelInstance::Yolo(Box::new(YoloGenerateModel::init_from_spec(spec)?))
         }
         ModelLoaderFamily::Legacy => {
             let weight_path = spec.paths.weight_dir.as_deref().unwrap_or_default();
@@ -103,6 +108,10 @@ mod tests {
         assert_eq!(
             resolve_model_loader_family(WhichModel::Qwen3Reranker0_6B),
             ModelLoaderFamily::Qwen3Reranker
+        );
+        assert_eq!(
+            resolve_model_loader_family(WhichModel::Yolo11Detect),
+            ModelLoaderFamily::Yolo
         );
     }
 

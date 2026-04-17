@@ -263,6 +263,30 @@ struct RunArgs {
     /// Model artifact format
     #[arg(long)]
     artifact_format: Option<ArtifactArg>,
+
+    /// Show prediction results in a live window (requires ffplay in PATH)
+    #[arg(long, default_value_t = false)]
+    show: bool,
+
+    /// Enable stream mode for video/rtsp inputs
+    #[arg(long, default_value_t = false)]
+    stream: bool,
+
+    /// Worker threads for batch inference acceleration (YOLO only)
+    #[arg(long)]
+    workers: Option<usize>,
+
+    /// Batch size for grouped processing (YOLO only)
+    #[arg(long)]
+    batch_size: Option<usize>,
+
+    /// Limit frames processed in stream mode (YOLO only)
+    #[arg(long)]
+    max_frames: Option<usize>,
+
+    /// Keep one frame every N frames in stream mode (YOLO only)
+    #[arg(long)]
+    frame_stride: Option<usize>,
 }
 
 /// Arguments for the 'delete' subcommand (delete model from default location)
@@ -474,6 +498,25 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
         WhichModel::GlmOCR => {
             use aha::exec::glm_ocr::GlmOcrExec;
             GlmOcrExec::run_with_spec(&args.input, args.output.as_deref(), spec, args.max_tokens)?;
+            Ok(true)
+        }
+        WhichModel::Yolo11Detect => {
+            use aha::exec::yolo::YoloExec;
+            use aha::exec::yolo::YoloExecOptions;
+            let options = YoloExecOptions {
+                show: args.show,
+                stream: args.stream,
+                workers: args.workers,
+                batch_size: args.batch_size,
+                max_frames: args.max_frames,
+                frame_stride: args.frame_stride,
+            };
+            YoloExec::run_with_spec_and_options(
+                &args.input,
+                args.output.as_deref(),
+                spec,
+                &options,
+            )?;
             Ok(true)
         }
         _ => Ok(false),
@@ -756,7 +799,8 @@ fn run_run(args: RunArgs) -> anyhow::Result<()> {
         | WhichModel::Qwen3_5_4BUnslothGguf
         | WhichModel::Qwen3_5_0_8BLmstudioGguf
         | WhichModel::Qwen3_5_2BLmstudioGguf
-        | WhichModel::Qwen3_5_4BLmstudioGguf => unreachable!(
+        | WhichModel::Qwen3_5_4BLmstudioGguf
+        | WhichModel::Yolo11Detect => unreachable!(
             "qwen3.5 gguf models should already be handled by run_target_model_with_spec"
         ),
     }
@@ -1087,6 +1131,49 @@ mod tests {
             args.tokenizer_dir.as_deref(),
             Some("D:\\model_download\\GLM-OCR-ONNX")
         );
+    }
+
+    #[test]
+    fn parse_yolo_run_stream_flags() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "yolo11-detect",
+            "--input",
+            "rtsp://127.0.0.1/live",
+            "--artifact-format",
+            "onnx",
+            "--onnx-path",
+            "D:\\model_download\\yolo26m-ONNX\\onnx\\model_q4f16.onnx",
+            "--stream",
+            "--show",
+            "--workers",
+            "4",
+            "--batch-size",
+            "8",
+            "--max-frames",
+            "120",
+            "--frame-stride",
+            "2",
+        ])
+        .expect("yolo run args should parse");
+
+        let Some(Commands::Run(args)) = cli.command else {
+            panic!("expected run subcommand");
+        };
+        assert_eq!(args.model, WhichModel::Yolo11Detect);
+        assert!(matches!(args.artifact_format, Some(ArtifactArg::Onnx)));
+        assert_eq!(
+            args.onnx_path.as_deref(),
+            Some("D:\\model_download\\yolo26m-ONNX\\onnx\\model_q4f16.onnx")
+        );
+        assert!(args.stream);
+        assert!(args.show);
+        assert_eq!(args.workers, Some(4));
+        assert_eq!(args.batch_size, Some(8));
+        assert_eq!(args.max_frames, Some(120));
+        assert_eq!(args.frame_stride, Some(2));
     }
 
     #[test]

@@ -68,6 +68,7 @@ pub fn supported_artifacts(model: WhichModel) -> &'static [ArtifactKind] {
         | WhichModel::Qwen3_5_0_8BLmstudioGguf
         | WhichModel::Qwen3_5_2BLmstudioGguf
         | WhichModel::Qwen3_5_4BLmstudioGguf => &[ArtifactKind::Gguf],
+        WhichModel::Yolo11Detect => &[ArtifactKind::Onnx],
         _ => &[ArtifactKind::Safetensors],
     }
 }
@@ -81,6 +82,7 @@ pub fn default_artifact(model: WhichModel) -> ArtifactKind {
         | WhichModel::Qwen3_5_0_8BLmstudioGguf
         | WhichModel::Qwen3_5_2BLmstudioGguf
         | WhichModel::Qwen3_5_4BLmstudioGguf => ArtifactKind::Gguf,
+        WhichModel::Yolo11Detect => ArtifactKind::Onnx,
         _ => ArtifactKind::Safetensors,
     }
 }
