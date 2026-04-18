@@ -276,9 +276,9 @@ struct RunArgs {
     #[arg(long)]
     workers: Option<usize>,
 
-    /// Batch size for grouped processing (YOLO only)
+    /// Chunk size for distributing work across parallel workers (YOLO only, default: 16). Does NOT control the ONNX batch dimension (always 1).
     #[arg(long)]
-    batch_size: Option<usize>,
+    chunk_size: Option<usize>,
 
     /// Limit frames processed in stream mode (YOLO only)
     #[arg(long)]
@@ -306,7 +306,7 @@ struct RunArgs {
 
     /// Force YOLO task kind instead of auto-detection: detect|segment|pose|classify|obb
     #[arg(long)]
-    task: Option<crate::models::yolo::config::YoloTaskKind>,
+    task: Option<aha::models::yolo::config::YoloTaskKind>,
 
     /// Enable class-agnostic NMS: suppress overlapping boxes across classes (YOLO only)
     #[arg(long, default_value_t = false)]
@@ -319,6 +319,10 @@ struct RunArgs {
     /// Keep original images in results for plotting (YOLO only, default: true)
     #[arg(long)]
     keep_images: Option<bool>,
+
+    /// Custom class names for YOLO, comma-separated (e.g. "face,person"). Overrides default COCO 80-class names.
+    #[arg(long, value_delimiter = ',')]
+    class_names: Option<Vec<String>>,
 }
 
 /// Arguments for the 'delete' subcommand (delete model from default location)
@@ -539,7 +543,7 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
                 show: args.show,
                 stream: args.stream,
                 workers: args.workers,
-                batch_size: args.batch_size,
+                batch_size: args.chunk_size,
                 max_frames: args.max_frames,
                 frame_stride: args.frame_stride,
                 stream_log_every: args.stream_log_every,
@@ -550,6 +554,7 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
                 nms_class_agnostic: if args.nms_class_agnostic { Some(true) } else { None },
                 keypoint_confidence_threshold: args.keypoint_conf,
                 keep_images: args.keep_images,
+                class_names: args.class_names.clone(),
             };
             YoloExec::run_with_spec_and_options(
                 &args.input,
@@ -1190,7 +1195,7 @@ mod tests {
             "--show",
             "--workers",
             "4",
-            "--batch-size",
+            "--chunk-size",
             "8",
             "--max-frames",
             "120",
@@ -1213,7 +1218,7 @@ mod tests {
         assert!(args.stream);
         assert!(args.show);
         assert_eq!(args.workers, Some(4));
-        assert_eq!(args.batch_size, Some(8));
+        assert_eq!(args.chunk_size, Some(8));
         assert_eq!(args.max_frames, Some(120));
         assert_eq!(args.frame_stride, Some(2));
         assert_eq!(args.stream_log_every, Some(15));

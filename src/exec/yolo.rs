@@ -32,7 +32,7 @@ pub struct YoloExecOptions {
     pub show: bool,
     pub stream: bool,
     pub workers: Option<usize>,
-    pub batch_size: Option<usize>,
+    pub batch_size: Option<usize>, // kept for backward compat, mapped to chunk_size
     pub max_frames: Option<usize>,
     pub frame_stride: Option<usize>,
     pub stream_log_every: Option<usize>,
@@ -44,6 +44,8 @@ pub struct YoloExecOptions {
     pub nms_class_agnostic: Option<bool>,
     pub keypoint_confidence_threshold: Option<f32>,
     pub keep_images: Option<bool>,
+    /// Custom class names. If set, overrides the default COCO 80-class names.
+    pub class_names: Option<Vec<String>>,
 }
 
 impl YoloExecOptions {
@@ -70,6 +72,9 @@ impl YoloExecOptions {
         }
         if let Some(v) = self.keep_images {
             config.keep_images = v;
+        }
+        if let Some(v) = &self.class_names {
+            config.class_names = Arc::from(v.as_slice());
         }
         config
     }
@@ -101,10 +106,10 @@ impl YoloExec {
         let predict_options = YoloPredictOptions {
             stream: options.stream,
             workers: options.workers.unwrap_or(1).max(1),
-            batch_size: options.batch_size.unwrap_or(16).max(1),
+            chunk_size: options.batch_size.unwrap_or(16).max(1),
             top_k: None,
-            max_frames: options.max_frames,
-            frame_stride: options.frame_stride.unwrap_or(1).max(1),
+            max_frames: None,
+            frame_stride: 1,
             stop_flag: None,
         };
 
@@ -138,7 +143,7 @@ impl YoloExec {
         let predict_options = YoloPredictOptions {
             stream: true,
             workers: options.workers.unwrap_or(1).max(1),
-            batch_size: options.batch_size.unwrap_or(1).max(1),
+            chunk_size: options.batch_size.unwrap_or(1).max(1),
             top_k: None,
             max_frames: options.max_frames,
             frame_stride: options.frame_stride.unwrap_or(1).max(1),

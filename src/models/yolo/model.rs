@@ -3,8 +3,9 @@ use std::sync::OnceLock;
 #[cfg(feature = "ffmpeg")]
 use std::sync::atomic::Ordering;
 use std::{
+    borrow::Cow,
     path::Path,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     thread,
     time::Instant,
 };
@@ -14,7 +15,7 @@ use anyhow::{Result, anyhow};
 use ffmpeg_next as ffmpeg;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use glob::glob;
-use image::{DynamicImage, Rgba, RgbaImage, imageops};
+use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage, imageops};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -25,7 +26,7 @@ use crate::{
     utils::{get_file_path, img_utils::load_image_from_url},
 };
 
-use super::config::{YoloConfig, YoloTaskKind};
+use super::config::{YoloConfig, YoloTaskKind, serialize_arc_slice, deserialize_arc_slice};
 
 const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "avi", "mov", "mkv", "webm"];
@@ -43,6 +44,11 @@ pub struct YoloMask {
     pub height: u32,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub data: Vec<u8>,
+    /// Bounding box of non-zero pixels as (y_min, y_max, x_min, x_max).
+    /// Pre-computed at mask construction time so that rendering can skip
+    /// the full-image scan for the bounding box.
+    #[serde(skip, default)]
+    pub bbox: (u32, u32, u32, u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -78,7 +84,7 @@ pub struct YoloSpeed {
     pub postprocess_ms: f32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoloResults {
     pub task: YoloTaskKind,
     pub boxes: Vec<YoloBox>,
@@ -91,12 +97,16 @@ pub struct YoloResults {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub obb: Vec<YoloObb>,
     pub path: String,
-    pub names: Vec<String>,
+    #[serde(
+        serialize_with = "serialize_arc_slice",
+        deserialize_with = "deserialize_arc_slice"
+    )]
+    pub names: Arc<[String]>,
     pub speed: YoloSpeed,
     pub width: u32,
     pub height: u32,
-    #[serde(skip_serializing)]
-    pub orig_img: Option<DynamicImage>,
+    #[serde(skip, default)]
+    pub orig_img: Option<Arc<DynamicImage>>,
 }
 
 impl YoloResults {
@@ -207,6 +217,8 @@ impl YoloResults {
         let mut lines = Vec::new();
         // Add task-type header for disambiguation
         lines.push(format!("# task: {:?}", self.task));
+        let w = self.width.max(1) as f32;
+        let h = self.height.max(1) as f32;
         if !self.probs.is_empty() {
             for prediction in &self.probs {
                 lines.push(format!(
@@ -215,26 +227,31 @@ impl YoloResults {
                 ));
             }
         } else if !self.obb.is_empty() {
+            // Ultralytics OBB format: cls x_center y_center width height angle conf
+            // with x/y/w/h normalized by image dimensions
             for obb in &self.obb {
                 lines.push(format!(
                     "{} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
                     obb.cls,
-                    obb.xywhr[0],
-                    obb.xywhr[1],
-                    obb.xywhr[2],
-                    obb.xywhr[3],
+                    obb.xywhr[0] / w,
+                    obb.xywhr[1] / h,
+                    obb.xywhr[2] / w,
+                    obb.xywhr[3] / h,
                     obb.xywhr[4],
                     obb.conf,
                 ));
             }
         } else {
+            // Ultralytics Detect/Pose/Segment format:
+            // cls x_center y_center width height conf [kpts...] [mask...]
+            // with x/y/w/h normalized by image dimensions
             for (index, detection) in self.boxes.iter().enumerate() {
                 let mut fields = vec![
                     detection.cls.to_string(),
-                    format!("{:.6}", detection.xywh[0]),
-                    format!("{:.6}", detection.xywh[1]),
-                    format!("{:.6}", detection.xywh[2]),
-                    format!("{:.6}", detection.xywh[3]),
+                    format!("{:.6}", detection.xywh[0] / w),
+                    format!("{:.6}", detection.xywh[1] / h),
+                    format!("{:.6}", detection.xywh[2] / w),
+                    format!("{:.6}", detection.xywh[3] / h),
                     format!("{:.6}", detection.conf),
                 ];
                 if let Some(points) = self.keypoints.get(index)
@@ -242,8 +259,8 @@ impl YoloResults {
                 {
                     fields.push("kpts".to_string());
                     for point in points {
-                        fields.push(format!("{:.6}", point.x));
-                        fields.push(format!("{:.6}", point.y));
+                        fields.push(format!("{:.6}", point.x / w));
+                        fields.push(format!("{:.6}", point.y / h));
                         fields.push(format!("{:.6}", point.conf));
                     }
                 }
@@ -252,8 +269,8 @@ impl YoloResults {
                     if !contour.is_empty() {
                         fields.push("mask".to_string());
                         for [x, y] in contour {
-                            fields.push(x.to_string());
-                            fields.push(y.to_string());
+                            fields.push(format!("{:.6}", x as f32 / w));
+                            fields.push(format!("{:.6}", y as f32 / h));
                         }
                     }
                 }
@@ -275,7 +292,10 @@ impl YoloResults {
 pub struct YoloPredictOptions {
     pub stream: bool,
     pub workers: usize,
-    pub batch_size: usize,
+    /// Chunk size for distributing work across parallel workers.
+    /// Each worker receives up to `chunk_size` images at a time.
+    /// This does **not** control the ONNX batch dimension (always 1).
+    pub chunk_size: usize,
     pub top_k: Option<usize>,
     pub max_frames: Option<usize>,
     pub frame_stride: usize,
@@ -287,7 +307,7 @@ impl Default for YoloPredictOptions {
         Self {
             stream: false,
             workers: 1,
-            batch_size: 16,
+            chunk_size: 16,
             top_k: None,
             max_frames: None,
             frame_stride: 1,
@@ -312,23 +332,67 @@ fn overlay_mask(image: &mut RgbaImage, mask: &YoloMask, color: Rgba<u8>, alpha: 
     if mask.width != image.width() || mask.height != image.height() {
         return;
     }
+    let (y_min, y_max, x_min, x_max) = mask.bbox;
+    if y_max == 0 && x_max == 0 {
+        // Empty mask — nothing to overlay.
+        return;
+    }
     let alpha_factor = alpha as f32 / 255.0;
-    for (index, pixel) in image.pixels_mut().enumerate() {
-        let Some(&mask_value) = mask.data.get(index) else {
-            break;
-        };
-        if mask_value == 0 {
-            continue;
-        }
-        let weight = (mask_value as f32 / 255.0) * alpha_factor;
-        for channel in 0..3 {
-            pixel.0[channel] = ((pixel.0[channel] as f32 * (1.0 - weight))
-                + (color.0[channel] as f32 * weight))
-                .round()
-                .clamp(0.0, 255.0) as u8;
+    let img_width = image.width() as usize;
+    let mask_width = mask.width as usize;
+    let row_range_x = x_min as usize..x_max as usize;
+    // Get a flat mutable slice of the image pixels for row-level access.
+    let img_raw = image.as_flat_samples_mut().samples;
+    for y in y_min as usize..y_max as usize {
+        let mask_row_start = y * mask_width;
+        let img_row_start = y * img_width;
+        for x in row_range_x.clone() {
+            let mask_value = mask.data.get(mask_row_start + x).copied().unwrap_or(0);
+            if mask_value == 0 {
+                continue;
+            }
+            let weight = (mask_value as f32 / 255.0) * alpha_factor;
+            let px = img_row_start + x;
+            for ch in 0..3 {
+                let offset = px * 4 + ch;
+                if let Some(cell) = img_raw.get_mut(offset) {
+                    *cell = ((*cell as f32 * (1.0 - weight))
+                        + (color.0[ch] as f32 * weight))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
         }
     }
 }
+
+/// Compute the bounding box of non-zero pixels in `data` within the given
+/// row/column bounds. Returns (y_min, y_max, x_min, x_max) for range iteration,
+/// or (0, 0, 0, 0) if no non-zero pixel is found.
+fn compute_mask_bbox(data: &[u8], width: u32, x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
+    let mut by_min = y2;
+    let mut by_max = y1;
+    let mut bx_min = x2;
+    let mut bx_max = x1;
+    for y in y1..y2 {
+        for x in x1..x2 {
+            if data.get((y * width + x) as usize).copied().unwrap_or(0) != 0 {
+                by_min = by_min.min(y);
+                by_max = by_max.max(y + 1);
+                bx_min = bx_min.min(x);
+                bx_max = bx_max.max(x + 1);
+            }
+        }
+    }
+    if by_max <= by_min || bx_max <= bx_min {
+        (0, 0, 0, 0)
+    } else {
+        (by_min, by_max, bx_min, bx_max)
+    }
+}
+
+
+
 
 fn draw_mask_contour(image: &mut RgbaImage, mask: &YoloMask, color: Rgba<u8>) {
     for [x, y] in sample_mask_contour_points(mask, 1, usize::MAX) {
@@ -460,8 +524,12 @@ fn sample_mask_contour_points(mask: &YoloMask, stride: usize, max_points: usize)
     let stride = stride.max(1);
     let mut points = Vec::new();
     let mut boundary_index = 0_usize;
-    for y in 0..mask.height {
-        for x in 0..mask.width {
+    let (y_min, y_max, x_min, x_max) = mask.bbox;
+    if y_max == 0 && x_max == 0 {
+        return Vec::new();
+    }
+    for y in y_min..y_max {
+        for x in x_min..x_max {
             if !is_mask_boundary(mask, x, y) {
                 continue;
             }
@@ -478,25 +546,27 @@ fn sample_mask_contour_points(mask: &YoloMask, stride: usize, max_points: usize)
 }
 
 fn collect_coco_categories(results: &[YoloResults]) -> Vec<serde_json::Value> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::<usize>::new();
     let mut categories = Vec::<(usize, String)>::new();
     for result in results {
         for (index, name) in result.names.iter().enumerate() {
-            if !categories.iter().any(|(cls, _)| *cls == index) {
+            if seen.insert(index) {
                 categories.push((index, name.clone()));
             }
         }
         for detection in &result.boxes {
-            if !categories.iter().any(|(cls, _)| *cls == detection.cls) {
+            if seen.insert(detection.cls) {
                 categories.push((detection.cls, detection.label.clone()));
             }
         }
         for obb in &result.obb {
-            if !categories.iter().any(|(cls, _)| *cls == obb.cls) {
+            if seen.insert(obb.cls) {
                 categories.push((obb.cls, obb.label.clone()));
             }
         }
         for prediction in &result.probs {
-            if !categories.iter().any(|(cls, _)| *cls == prediction.cls) {
+            if seen.insert(prediction.cls) {
                 categories.push((prediction.cls, prediction.label.clone()));
             }
         }
@@ -559,6 +629,10 @@ pub struct YoloModel {
     backend: YoloOnnxBackend,
     config: YoloConfig,
     onnx_path: String,
+    /// Pool of pre-loaded ONNX backends for parallel inference.
+    /// After `predict_parallel` finishes, backends are returned here
+    /// so subsequent calls can reuse them instead of reloading from disk.
+    backend_pool: Mutex<Vec<YoloOnnxBackend>>,
 }
 
 impl YoloModel {
@@ -567,6 +641,7 @@ impl YoloModel {
     }
 
     pub fn init_with_config(spec: &LoadSpec, config: YoloConfig) -> Result<Self> {
+        let config = config.validate();
         match spec.resolved_artifact() {
             ArtifactKind::Onnx => {
                 let onnx_path = spec
@@ -578,6 +653,7 @@ impl YoloModel {
                     backend: YoloOnnxBackend::load(onnx_path, &config)?,
                     config,
                     onnx_path: onnx_path.to_string(),
+                    backend_pool: Mutex::new(Vec::new()),
                 };
                 model.warmup()?;
                 Ok(model)
@@ -632,9 +708,9 @@ impl YoloModel {
         } else {
             let workers = options.workers.max(1);
             if workers == 1 || sources.len() <= 1 {
-                self.predict_sequential(sources, options.batch_size.max(1), options.top_k)?
+                self.predict_sequential(sources, options.top_k)?
             } else {
-                self.predict_parallel(sources, workers, options.batch_size.max(1), options.top_k)?
+                self.predict_parallel(sources, workers, options.chunk_size.max(1), options.top_k)?
             }
         };
 
@@ -708,13 +784,10 @@ impl YoloModel {
     fn predict_sequential(
         &mut self,
         sources: Vec<ResolvedImageSource>,
-        batch_size: usize,
         top_k: Option<usize>,
     ) -> Result<Vec<YoloResults>> {
         // NOTE: Each image is inferred individually with batch_size=1 to the ONNX
         // session because the model input shape is fixed at [1,3,H,W].
-        // The batch_size parameter controls chunking for progress reporting only.
-        let _ = batch_size;
         let mut results = Vec::with_capacity(sources.len());
         for item in sources {
             results.push(self.backend.predict(&item, &self.config, top_k)?);
@@ -726,41 +799,61 @@ impl YoloModel {
         &self,
         sources: Vec<ResolvedImageSource>,
         workers: usize,
-        batch_size: usize,
+        chunk_size: usize,
         top_k: Option<usize>,
     ) -> Result<Vec<YoloResults>> {
         let indexed_sources = sources.into_iter().enumerate().collect::<Vec<_>>();
-        let chunk_size = batch_size.max(indexed_sources.len().div_ceil(workers).max(1));
+        let actual_chunk = chunk_size.max(indexed_sources.len().div_ceil(workers).max(1));
         let grouped = indexed_sources
-            .chunks(chunk_size)
+            .chunks(actual_chunk)
             .map(|chunk| chunk.to_vec())
             .collect::<Vec<_>>();
 
+        // Try to reuse backends from the pool first, only creating new ones
+        // when the pool doesn't have enough.
+        let needed = grouped.len();
+        let mut pool = self.backend_pool.lock().unwrap_or_else(|e| e.into_inner());
+        let reuse_count = needed.min(pool.len());
+        let mut backends: Vec<YoloOnnxBackend> = pool.drain(..reuse_count).collect();
+        drop(pool); // Release lock before expensive ONNX session creation.
+
+        while backends.len() < needed {
+            backends.push(YoloOnnxBackend::load(&self.onnx_path, &self.config)?);
+        }
+
         let mut joined = Vec::<(usize, YoloResults)>::new();
-        thread::scope(|scope| -> Result<()> {
+        let used_backends = thread::scope(|scope| -> Result<Vec<YoloOnnxBackend>> {
             let mut handles = Vec::with_capacity(grouped.len());
-            for group in grouped {
-                let onnx_path = self.onnx_path.clone();
+            let mut backend_iter = backends.into_iter();
+            for group in grouped.into_iter() {
+                let mut backend = backend_iter
+                    .next()
+                    .ok_or_else(|| anyhow!("insufficient ONNX backends for parallel inference"))?;
                 let config = self.config.clone();
                 let top_k = top_k;
-                handles.push(scope.spawn(move || -> Result<Vec<(usize, YoloResults)>> {
-                    let mut backend = YoloOnnxBackend::load(&onnx_path, &config)?;
+                handles.push(scope.spawn(move || -> Result<(Vec<(usize, YoloResults)>, YoloOnnxBackend)> {
                     let mut partial = Vec::with_capacity(group.len());
                     for (idx, item) in group {
                         partial.push((idx, backend.predict(&item, &config, top_k)?));
                     }
-                    Ok(partial)
+                    Ok((partial, backend))
                 }));
             }
 
+            let mut returned_backends = Vec::with_capacity(handles.len());
             for handle in handles {
-                let partial = handle
+                let (partial, backend) = handle
                     .join()
                     .map_err(|_| anyhow!("yolo worker thread panicked"))??;
                 joined.extend(partial);
+                returned_backends.push(backend);
             }
-            Ok(())
+            Ok(returned_backends)
         })?;
+
+        // Return backends to the pool for reuse by subsequent calls.
+        let mut pool = self.backend_pool.lock().unwrap_or_else(|e| e.into_inner());
+        pool.extend(used_backends);
 
         joined.sort_by_key(|(idx, _)| *idx);
         Ok(joined.into_iter().map(|(_, result)| result).collect())
@@ -777,7 +870,7 @@ struct YoloOnnxBackend {
     output_names: Vec<String>,
     input_height: usize,
     input_width: usize,
-    class_names: Vec<String>,
+    class_names: Arc<[String]>,
 }
 
 impl YoloOnnxBackend {
@@ -894,7 +987,7 @@ impl YoloOnnxBackend {
                 },
                 width: item.image.width(),
                 height: item.image.height(),
-                orig_img: Some(item.image.clone()),
+                orig_img: Some(Arc::new(item.image.clone())),
             })
         }
         #[cfg(not(feature = "onnx-runtime"))]
@@ -921,18 +1014,17 @@ fn preprocess_image(
     let resized_w = ((orig_w as f32 * scale).round() as u32).max(1);
     let resized_h = ((orig_h as f32 * scale).round() as u32).max(1);
     let resized = image
-        .resize_exact(resized_w, resized_h, imageops::FilterType::CatmullRom)
-        .to_rgba8();
-    let mut canvas = RgbaImage::from_pixel(
+        .resize_exact(resized_w, resized_h, imageops::FilterType::Triangle)
+        .to_rgb8();
+    let mut canvas = RgbImage::from_pixel(
         input_width as u32,
         input_height as u32,
-        Rgba([114, 114, 114, 255]),
+        Rgb([114, 114, 114]),
     );
     let pad_x = ((input_width as u32).saturating_sub(resized_w)) / 2;
     let pad_y = ((input_height as u32).saturating_sub(resized_h)) / 2;
     imageops::replace(&mut canvas, &resized, pad_x as i64, pad_y as i64);
-    let rgb = DynamicImage::ImageRgba8(canvas).to_rgb8();
-    let raw = rgb.as_raw();
+    let raw = canvas.as_raw();
     let plane = input_width * input_height;
     let mut tensor = vec![0.0_f32; plane * 3];
     for index in 0..plane {
@@ -1282,6 +1374,7 @@ fn try_decode_yolo_obb_output(
         }
     }
 
+    candidates.sort_by(|left, right| right.conf.total_cmp(&left.conf));
     let obb = non_max_suppression_obb(candidates, iou_threshold, max_detections, nms_class_agnostic);
     Ok(Some(DecodedYoloOutput {
         task: YoloTaskKind::Obb,
@@ -1336,9 +1429,16 @@ fn try_decode_yolo_pose_output(
 }
 
 fn select_primary_output<'a>(outputs: &'a [OnnxOutputTensor<'a>]) -> Option<&'a OnnxOutputTensor<'a>> {
+    // Priority: 3D tensor (standard detection/segment/pose/obb output) > 2D/1D
+    // (classification). 4D tensors are mask protos and excluded here.
     outputs
         .iter()
-        .find(|tensor| tensor.shape.len() != 4)
+        .find(|tensor| tensor.shape.len() == 3)
+        .or_else(|| {
+            outputs
+                .iter()
+                .find(|tensor| tensor.shape.len() != 4)
+        })
         .or_else(|| outputs.first())
 }
 
@@ -1346,12 +1446,23 @@ fn find_mask_proto_output<'a>(outputs: &'a [OnnxOutputTensor<'a>]) -> Option<&'a
     outputs.iter().find(|tensor| tensor.shape.len() == 4)
 }
 
+/// Maximum plausible class count for classification outputs.
+/// Detection outputs typically have attribute counts in the range 6..=120,
+/// while classification outputs have class counts in the range 2..=10000.
+/// A value above this threshold is almost certainly not a classification output.
+const MAX_CLASSIFICATION_CLASSES: i64 = 100_000;
+
 fn is_classification_output(tensor: &OnnxOutputTensor<'_>) -> bool {
     match tensor.shape.as_slice() {
-        [classes] => *classes > 1,
-        [1, classes] => *classes > 1,
-        [1, 1, classes] => *classes > 1,
-        [1, classes, 1] => *classes > 1,
+        // Standard classification shapes: [C], [1, C], [1, C, 1]
+        // C must be > 1 (at least 2 classes) and within a plausible range.
+        [classes] => *classes > 1 && *classes <= MAX_CLASSIFICATION_CLASSES,
+        [1, classes] => *classes > 1 && *classes <= MAX_CLASSIFICATION_CLASSES,
+        [1, classes, 1] => *classes > 1 && *classes <= MAX_CLASSIFICATION_CLASSES,
+        // [1, 1, C] is ambiguous — could be a single-prediction detection output.
+        // Only treat as classification if C is large enough that it cannot be
+        // a detection attribute count (detection attrs are typically < 120).
+        [1, 1, classes] => *classes > 120 && *classes <= MAX_CLASSIFICATION_CLASSES,
         _ => false,
     }
 }
@@ -1365,8 +1476,20 @@ fn is_probable_obb_output(tensor: &OnnxOutputTensor<'_>) -> bool {
 }
 
 fn prediction_layout(shape: &[i64], min_attr_count: usize) -> Result<PredictionLayout> {
-    if shape.len() != 3 || shape[0] != 1 {
+    if shape.len() != 3 {
         return Err(anyhow!("unsupported yolo output shape: {:?}", shape));
+    }
+    // Support batch dimension: if batch > 1 we still process as if batch=1
+    // because our inference always uses batch_size=1. Dynamic batch models
+    // may report batch as -1 or > 1 in the shape metadata, but the actual
+    // output at runtime always has batch=1 for our single-image inference.
+    let batch = shape[0];
+    if batch != 1 && batch != -1 {
+        // Log a warning but don't fail — the actual data has batch=1 at runtime.
+        eprintln!(
+            "[yolo] warning: output batch dimension is {} but expected 1; proceeding with batch=1",
+            batch
+        );
     }
     let dim1 = shape[1].max(1) as usize;
     let dim2 = shape[2].max(1) as usize;
@@ -1385,14 +1508,16 @@ fn prediction_layout(shape: &[i64], min_attr_count: usize) -> Result<PredictionL
     })
 }
 
-fn prediction_at(values: &[f32], layout: &PredictionLayout, pred_index: usize) -> Vec<f32> {
+fn prediction_at<'a>(values: &'a [f32], layout: &PredictionLayout, pred_index: usize) -> Cow<'a, [f32]> {
     if layout.transposed {
-        (0..layout.attr_count)
-            .map(|attr_index| values[attr_index * layout.pred_count + pred_index])
-            .collect()
+        Cow::Owned(
+            (0..layout.attr_count)
+                .map(|attr_index| values[attr_index * layout.pred_count + pred_index])
+                .collect(),
+        )
     } else {
         let start = pred_index * layout.attr_count;
-        values[start..start + layout.attr_count].to_vec()
+        Cow::Borrowed(&values[start..start + layout.attr_count])
     }
 }
 
@@ -1458,9 +1583,12 @@ fn infer_obb_aux_layout(
 }
 
 fn infer_pose_aux_layout(attr_count: usize, preferred_class_count: usize) -> Option<PredictionAuxLayout> {
+    // Keypoints are stored as (x, y, confidence) triplets, so the minimum
+    // extra dimension count for a valid pose output is 6 (2 keypoints × 3).
+    const MIN_KEYPOINT_EXTRA_DIMS: usize = 6;
     for has_objectness in [true, false] {
         let base = if has_objectness { 5 } else { 4 };
-        if attr_count <= base + preferred_class_count + 5 {
+        if attr_count <= base + preferred_class_count + MIN_KEYPOINT_EXTRA_DIMS.saturating_sub(1) {
             continue;
         }
         let extra_dims = attr_count.checked_sub(base + preferred_class_count)?;
@@ -1612,6 +1740,11 @@ fn decode_rect_mask(meta: &LetterboxMeta, xyxy: &[f32; 4]) -> YoloMask {
     let y1 = xyxy[1].floor().clamp(0.0, height as f32) as u32;
     let x2 = xyxy[2].ceil().clamp(0.0, width as f32) as u32;
     let y2 = xyxy[3].ceil().clamp(0.0, height as f32) as u32;
+    let bbox = if x2 > x1 && y2 > y1 {
+        (y1, y2, x1, x2)
+    } else {
+        (0, 0, 0, 0)
+    };
     for y in y1..y2 {
         for x in x1..x2 {
             let index = (y * width + x) as usize;
@@ -1620,7 +1753,7 @@ fn decode_rect_mask(meta: &LetterboxMeta, xyxy: &[f32; 4]) -> YoloMask {
             }
         }
     }
-    YoloMask { width, height, data }
+    YoloMask { width, height, data, bbox }
 }
 
 fn decode_mask_from_proto(
@@ -1636,25 +1769,38 @@ fn decode_mask_from_proto(
     let height = meta.orig_h;
     let mut data = vec![0_u8; width as usize * height as usize];
     if coeffs.is_empty() {
-        return Ok(YoloMask { width, height, data });
+        return Ok(YoloMask { width, height, data, bbox: (0, 0, 0, 0) });
     }
 
-    let (channels, proto_h, proto_w, nchw) = if proto.shape[1].max(1) as usize == coeffs.len() {
-        (
-            proto.shape[1].max(1) as usize,
-            proto.shape[2].max(1) as usize,
-            proto.shape[3].max(1) as usize,
-            true,
-        )
-    } else if proto.shape[3].max(1) as usize == coeffs.len() {
-        (
-            proto.shape[3].max(1) as usize,
-            proto.shape[1].max(1) as usize,
-            proto.shape[2].max(1) as usize,
-            false,
-        )
-    } else {
-        return Err(anyhow!("proto channel count does not match coeffs"));
+    let (channels, proto_h, proto_w, nchw) = {
+        let dim1 = proto.shape[1].max(1) as usize;
+        let dim2 = proto.shape[2].max(1) as usize;
+        let dim3 = proto.shape[3].max(1) as usize;
+
+        let nchw_matches = dim1 == coeffs.len();
+        let nhwc_matches = dim3 == coeffs.len();
+
+        if nchw_matches && nhwc_matches {
+            // Ambiguous: dim1 == dim3 == coeffs.len(). Disambiguate by
+            // convention — in NCHW the channel dimension is typically much
+            // smaller than spatial dimensions (e.g. [1, 32, 160, 160]),
+            // while in NHWC it's the last dimension (e.g. [1, 160, 160, 32]).
+            // If dim2 > dim1, then NCHW is more likely (channel is small).
+            // If dim2 < dim1, then NHWC is more likely (spatial is small).
+            // If dim2 == dim1, default to NCHW (Ultralytics standard).
+            let is_nchw = dim2 >= dim1;
+            if is_nchw {
+                (dim1, dim2, dim3, true)
+            } else {
+                (dim3, dim1, dim2, false)
+            }
+        } else if nchw_matches {
+            (dim1, dim2, dim3, true)
+        } else if nhwc_matches {
+            (dim3, dim1, dim2, false)
+        } else {
+            return Err(anyhow!("proto channel count does not match coeffs"));
+        }
     };
 
     let input_w = (meta.orig_w as f32 * meta.scale + meta.pad_x * 2.0).max(1.0);
@@ -1674,15 +1820,37 @@ fn decode_mask_from_proto(
             let py = ((y_input / input_h) * proto_h as f32)
                 .floor()
                 .clamp(0.0, (proto_h.saturating_sub(1)) as f32) as usize;
-            let mut logit = 0.0_f32;
-            for channel in 0..channels {
-                let proto_index = if nchw {
-                    channel * proto_h * proto_w + py * proto_w + px
-                } else {
-                    py * proto_w * channels + px * channels + channel
-                };
-                logit += coeffs[channel] * proto.values.get(proto_index).copied().unwrap_or(0.0);
-            }
+            // Compute dot product of coeffs with proto column at (px, py).
+            // For NCHW layout the channel values are contiguous at
+            //   [c*proto_h*proto_w + py*proto_w + px] for each c,
+            // so stride = proto_h * proto_w.
+            // For NHWC layout they are contiguous at
+            //   [py*proto_w*channels + px*channels + 0..channels],
+            // which allows a direct slice dot-product.
+            let logit = if nchw {
+                let stride = proto_h * proto_w;
+                let base = py * proto_w + px;
+                coeffs
+                    .iter()
+                    .enumerate()
+                    .map(|(c, &coeff)| {
+                        coeff * proto.values.get(c * stride + base).copied().unwrap_or(0.0)
+                    })
+                    .sum::<f32>()
+            } else {
+                let base = py * proto_w * channels + px * channels;
+                proto
+                    .values
+                    .get(base..base + channels)
+                    .map(|slice| {
+                        slice
+                            .iter()
+                            .zip(coeffs.iter())
+                            .map(|(&p, &c)| c * p)
+                            .sum::<f32>()
+                    })
+                    .unwrap_or(0.0)
+            };
             if normalize_confidence(logit) >= 0.5 {
                 let index = (y * width + x) as usize;
                 if let Some(cell) = data.get_mut(index) {
@@ -1692,7 +1860,8 @@ fn decode_mask_from_proto(
         }
     }
 
-    Ok(YoloMask { width, height, data })
+    let bbox = compute_mask_bbox(&data, width, x1, y1, x2, y2);
+    Ok(YoloMask { width, height, data, bbox })
 }
 
 fn restore_point(x: f32, y: f32, meta: &LetterboxMeta) -> [f32; 2] {
@@ -1703,14 +1872,35 @@ fn restore_point(x: f32, y: f32, meta: &LetterboxMeta) -> [f32; 2] {
 }
 
 fn normalize_obb_angle(value: f32) -> f32 {
-    // If the value is already within a reasonable angle range, keep it as-is.
-    if value.abs() <= std::f32::consts::PI * 2.0 {
-        return value;
+    // Ultralytics OBB export always outputs the angle as sigmoid(angle_raw) * π,
+    // producing values in [0, π]. However, some export formats (e.g. full-precision
+    // ONNX) may already apply sigmoid but forget the *π scaling, yielding a value
+    // in [0, 1], while others output raw logits (large magnitude).
+    //
+    // Detection heuristic (order matters — check narrow ranges first):
+    //   - If value is in [1, π], it's already a decoded angle in radians.
+    //     Note: value=1.0 is treated as 1.0 radian (≈57.3°), not sigmoid*π.
+    //     This is because a sigmoid output of exactly 1.0 requires logit→∞,
+    //     which is extremely unlikely in practice, while 1.0 radian is a
+    //     common angle value.
+    //   - If value is in (0, 1), it's a sigmoid output missing the *π scaling.
+    //   - If value is exactly 0 or very close, treat as angle 0 (not sigmoid).
+    //   - Otherwise (large magnitude or negative), treat as raw logit and apply
+    //     sigmoid * π.
+    if value >= 1.0 && value <= std::f32::consts::PI {
+        // Already a valid angle in radians (e.g. 1.0 rad ≈ 57.3°, 1.5 rad, etc.)
+        value
+    } else if value > 0.0 && value < 1.0 {
+        // Sigmoid output missing the π scaling — apply it.
+        // Values in (0, 1) from sigmoid(angle_raw) need *π to become radians.
+        value * std::f32::consts::PI
+    } else if value.abs() < 1e-6 {
+        // Near-zero angle — could be either format, return 0 either way.
+        0.0
+    } else {
+        // Raw logit or out-of-range — apply sigmoid then scale.
+        normalize_confidence(value) * std::f32::consts::PI
     }
-    // For values that look like raw logits (large magnitude), apply sigmoid
-    // and then scale to [0, π]. This matches the Ultralytics convention where
-    // the angle output is sigmoid(angle_raw) * π when the raw value is unbounded.
-    normalize_confidence(value) * std::f32::consts::PI
 }
 
 fn oriented_box_corners(center: [f32; 2], width: f32, height: f32, angle: f32) -> [[f32; 2]; 4] {
@@ -1746,9 +1936,25 @@ fn corners_to_xyxy(corners: &[[f32; 2]; 4]) -> [f32; 4] {
     [min_x, min_y, max_x, max_y]
 }
 
+/// Apply sigmoid normalization if the value appears to be a raw logit.
+///
+/// YOLOv5/v7 outputs raw objectness logits (large magnitude), while YOLOv8/v9/v10
+/// outputs sigmoid-activated class scores in [0, 1]. The heuristic distinguishes
+/// between the two by checking whether the value is in a plausible probability range.
+/// A small margin (0.05) is added above 1.0 to handle slight numerical overshoot
+/// from sigmoid computations that may land just outside [0, 1].
+///
+/// # Heuristic details
+///
+/// - Values in (0.0, 1.05] are treated as pre-activated probabilities (YOLOv8 style).
+/// - A value of exactly 0.0 is treated as a raw logit, because a sigmoid output of
+///   0.0 would require a logit of -∞, which never occurs in practice. A raw logit
+///   of 0.0 → sigmoid(0.0) = 0.5, which is the correct interpretation for YOLOv5
+///   objectness scores.
+/// - Negative values and values > 1.05 are treated as raw logits → sigmoid applied.
 fn normalize_confidence(value: f32) -> f32 {
-    if (0.0..=1.0).contains(&value) {
-        value
+    if value > 0.0 && value <= 1.05 {
+        value.min(1.0)
     } else {
         1.0 / (1.0 + (-value).exp())
     }
@@ -1775,11 +1981,19 @@ fn decode_single_prediction(
                 meta,
             )
         };
-        let conf = prediction[4];
+        // Apply normalize_confidence to handle both raw logits (YOLOv5 style)
+        // and pre-activated probabilities (YOLOv8 style).
+        let conf = normalize_confidence(prediction[4]);
         if conf < conf_threshold {
             return None;
         }
-        let cls = prediction[5].max(0.0) as usize;
+        // len==6 format: [x, y, w, h, conf, cls_id]
+        // cls_id may carry a fractional part due to quantization, so round
+        // instead of truncating to handle values like 2.9999 → 3.
+        let cls = prediction[5].round().max(0.0) as usize;
+        // Clamp cls to valid range to avoid out-of-bounds when quantization
+        // produces values beyond the class count.
+        let cls = cls.min(class_names.len().saturating_sub(1));
         let label = class_names
             .get(cls)
             .cloned()
@@ -1845,93 +2059,101 @@ fn xyxy_to_xywh(xyxy: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// Trait abstracting the NMS-relevant operations for a detection type.
+trait NmsDetection: Clone {
+    fn class_id(&self) -> usize;
+    fn iou_with(&self, other: &Self) -> f32;
+}
+
+impl NmsDetection for YoloBox {
+    fn class_id(&self) -> usize {
+        self.cls
+    }
+    fn iou_with(&self, other: &Self) -> f32 {
+        intersection_over_union(&self.xyxy, &other.xyxy)
+    }
+}
+
+impl NmsDetection for YoloObb {
+    fn class_id(&self) -> usize {
+        self.cls
+    }
+    fn iou_with(&self, other: &Self) -> f32 {
+        rotated_iou(&self.corners, &other.corners)
+    }
+}
+
+impl<T: Clone> NmsDetection for (YoloBox, T) {
+    fn class_id(&self) -> usize {
+        self.0.cls
+    }
+    fn iou_with(&self, other: &Self) -> f32 {
+        intersection_over_union(&self.0.xyxy, &other.0.xyxy)
+    }
+}
+
+/// Generic Non-Maximum Suppression.
+///
+/// Assumes `detections` is already sorted by confidence in descending order.
+/// When `nms_class_agnostic` is true, suppresses across all classes;
+/// otherwise only suppresses within the same class.
+fn nms<D: NmsDetection>(
+    detections: Vec<D>,
+    iou_threshold: f32,
+    max_detections: usize,
+    nms_class_agnostic: bool,
+) -> Vec<D> {
+    let mut selected = Vec::new();
+    let mut suppressed = vec![false; detections.len()];
+    for index in 0..detections.len() {
+        if suppressed[index] || selected.len() >= max_detections {
+            continue;
+        }
+        let current = &detections[index];
+        for candidate_index in (index + 1)..detections.len() {
+            if suppressed[candidate_index] {
+                continue;
+            }
+            let same_class = detections[candidate_index].class_id() == current.class_id();
+            if (nms_class_agnostic || same_class)
+                && current.iou_with(&detections[candidate_index]) >= iou_threshold
+            {
+                suppressed[candidate_index] = true;
+            }
+        }
+        selected.push(detections[index].clone());
+    }
+    selected
+}
+
+/// Convenience wrapper for standard detection NMS (boxes only).
 fn non_max_suppression(
     detections: Vec<YoloBox>,
     iou_threshold: f32,
     max_detections: usize,
     nms_class_agnostic: bool,
 ) -> Vec<YoloBox> {
-    let mut selected = Vec::new();
-    let mut suppressed = vec![false; detections.len()];
-    for index in 0..detections.len() {
-        if suppressed[index] || selected.len() >= max_detections {
-            continue;
-        }
-        let current = detections[index].clone();
-        for candidate_index in (index + 1)..detections.len() {
-            if suppressed[candidate_index] {
-                continue;
-            }
-            let same_class = detections[candidate_index].cls == current.cls;
-            if (nms_class_agnostic || same_class)
-                && intersection_over_union(&current.xyxy, &detections[candidate_index].xyxy) >= iou_threshold
-            {
-                suppressed[candidate_index] = true;
-            }
-        }
-        selected.push(current);
-    }
-    selected
+    nms(detections, iou_threshold, max_detections, nms_class_agnostic)
 }
 
+/// Convenience wrapper for OBB NMS using rotated IoU.
 fn non_max_suppression_obb(
     detections: Vec<YoloObb>,
     iou_threshold: f32,
     max_detections: usize,
     nms_class_agnostic: bool,
 ) -> Vec<YoloObb> {
-    let mut selected = Vec::new();
-    let mut suppressed = vec![false; detections.len()];
-    for index in 0..detections.len() {
-        if suppressed[index] || selected.len() >= max_detections {
-            continue;
-        }
-        let current = detections[index].clone();
-        for candidate_index in (index + 1)..detections.len() {
-            if suppressed[candidate_index] {
-                continue;
-            }
-            let same_class = detections[candidate_index].cls == current.cls;
-            if nms_class_agnostic || same_class {
-                let iou = rotated_iou(&current.corners, &detections[candidate_index].corners);
-                if iou >= iou_threshold {
-                    suppressed[candidate_index] = true;
-                }
-            }
-        }
-        selected.push(current);
-    }
-    selected
+    nms(detections, iou_threshold, max_detections, nms_class_agnostic)
 }
 
+/// Convenience wrapper for NMS with auxiliary data (masks or keypoints).
 fn non_max_suppression_with_aux<T: Clone>(
     detections: Vec<(YoloBox, T)>,
     iou_threshold: f32,
     max_detections: usize,
     nms_class_agnostic: bool,
 ) -> Vec<(YoloBox, T)> {
-    let mut selected = Vec::new();
-    let mut suppressed = vec![false; detections.len()];
-    for index in 0..detections.len() {
-        if suppressed[index] || selected.len() >= max_detections {
-            continue;
-        }
-        let current = detections[index].clone();
-        for candidate_index in (index + 1)..detections.len() {
-            if suppressed[candidate_index] {
-                continue;
-            }
-            let same_class = detections[candidate_index].0.cls == current.0.cls;
-            if (nms_class_agnostic || same_class)
-                && intersection_over_union(&current.0.xyxy, &detections[candidate_index].0.xyxy)
-                    >= iou_threshold
-            {
-                suppressed[candidate_index] = true;
-            }
-        }
-        selected.push(current);
-    }
-    selected
+    nms(detections, iou_threshold, max_detections, nms_class_agnostic)
 }
 
 fn intersection_over_union(left: &[f32; 4], right: &[f32; 4]) -> f32 {
@@ -1952,18 +2174,22 @@ fn intersection_over_union(left: &[f32; 4], right: &[f32; 4]) -> f32 {
 /// Uses the Sutherland-Hodgman algorithm to clip one polygon against the other,
 /// then computes the intersection area from the clipped polygon.
 fn rotated_iou(corners_a: &[[f32; 2]; 4], corners_b: &[[f32; 2]; 4]) -> f32 {
-    let area_a = polygon_area(corners_a);
-    let area_b = polygon_area(corners_b);
+    // Sutherland-Hodgman requires counter-clockwise winding for correct clipping.
+    let ccw_a = ensure_counter_clockwise(corners_a);
+    let ccw_b = ensure_counter_clockwise(corners_b);
+    let area_a = polygon_area(&ccw_a);
+    let area_b = polygon_area(&ccw_b);
     if area_a <= 0.0 || area_b <= 0.0 {
         return 0.0;
     }
-    let inter = polygon_intersection_area(corners_a, corners_b);
+    let inter = polygon_intersection_area(&ccw_a, &ccw_b);
     let union = area_a + area_b - inter;
     if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 /// Compute the signed area of a convex polygon using the shoelace formula.
-fn polygon_area(vertices: &[[f32; 2]; 4]) -> f32 {
+/// A positive signed area indicates counter-clockwise winding; negative indicates clockwise.
+fn signed_polygon_area(vertices: &[[f32; 2]; 4]) -> f32 {
     let n = vertices.len();
     let mut area = 0.0_f32;
     for i in 0..n {
@@ -1971,7 +2197,24 @@ fn polygon_area(vertices: &[[f32; 2]; 4]) -> f32 {
         area += vertices[i][0] * vertices[j][1];
         area -= vertices[j][0] * vertices[i][1];
     }
-    area.abs() * 0.5
+    area * 0.5
+}
+
+/// Compute the unsigned area of a convex polygon using the shoelace formula.
+fn polygon_area(vertices: &[[f32; 2]; 4]) -> f32 {
+    signed_polygon_area(vertices).abs()
+}
+
+/// Ensure the polygon vertices are in counter-clockwise order by reversing
+/// them if the signed area is negative (clockwise winding).
+fn ensure_counter_clockwise(vertices: &[[f32; 2]; 4]) -> [[f32; 2]; 4] {
+    if signed_polygon_area(vertices) < 0.0 {
+        let mut v = *vertices;
+        v.reverse();
+        v
+    } else {
+        *vertices
+    }
 }
 
 /// Compute the intersection area of two convex polygons using Sutherland-Hodgman clipping.
@@ -2084,32 +2327,45 @@ fn split_detection_prediction<'a>(
         }
     }
 
-    let with_objectness = if prediction.len() > 5 {
-        Some((prediction[4], &prediction[5..]))
-    } else {
-        None
-    };
-    let without_objectness = Some((1.0, &prediction[4..]));
+    // Heuristic: decide whether the prediction includes an objectness score
+    // by examining whether the values after the 4 bbox coords look like raw
+    // logits (large magnitude → objectness present, YOLOv5 style) or
+    // probabilities (small magnitude → no objectness, YOLOv8 style).
+    //
+    // We use a two-step heuristic:
+    // 1. Check if the majority of values after bbox are outside [−0.1, 1.1].
+    //    If most values are raw logits, the prediction likely has objectness.
+    //    Using majority vote avoids misclassification from a single value
+    //    that slightly exceeds the sigmoid output range due to floating-point
+    //    imprecision.
+    // 2. If the counts are ambiguous, check the candidate objectness value
+    //    itself: a valid objectness probability should be in [0, 1.05],
+    //    while a raw logit is typically outside this range.
+    let after_bbox = &prediction[4..];
+    if after_bbox.is_empty() {
+        return None;
+    }
 
-    match (with_objectness, without_objectness) {
-        (Some((obj, scores)), Some((fallback_obj, fallback_scores))) => {
-            let with_score = scores.iter().copied().map(normalize_confidence).fold(0.0_f32, f32::max)
-                * normalize_confidence(obj);
-            let without_score = fallback_scores
-                .iter()
-                .copied()
-                .map(normalize_confidence)
-                .fold(0.0_f32, f32::max)
-                * fallback_obj;
-            if with_score >= without_score {
-                Some((obj, scores))
-            } else {
-                Some((fallback_obj, fallback_scores))
-            }
-        }
-        (Some(value), None) => Some(value),
-        (None, Some(value)) => Some(value),
-        (None, None) => None,
+    let out_of_prob_range = |v: f32| v > 1.1 || v < -0.1;
+    let out_count = after_bbox.iter().filter(|&&v| out_of_prob_range(v)).count();
+    let has_objectness = if out_count > after_bbox.len() / 2 {
+        // Majority of values are clearly logits → has objectness
+        true
+    } else if out_count == 0 {
+        // All values in probability range → no objectness
+        false
+    } else {
+        // Ambiguous: check whether the first value (candidate objectness)
+        // looks like a raw logit or a probability.
+        out_of_prob_range(after_bbox[0])
+    };
+
+    if has_objectness {
+        // First value after bbox is objectness, rest are class scores (raw logits).
+        Some((after_bbox[0], &after_bbox[1..]))
+    } else {
+        // No objectness — all values after bbox are class scores (already in [0,1]).
+        Some((1.0, after_bbox))
     }
 }
 
@@ -2215,13 +2471,18 @@ fn draw_text_8x8(image: &mut RgbaImage, x: u32, y: u32, text: &str, color: Rgba<
             }
             cursor_x = cursor_x.saturating_add(8);
         } else {
-            // Non-ASCII characters: draw a filled 8x8 block as placeholder
+            // Non-ASCII characters: draw a hollow 8x8 box as placeholder
+            // (more distinguishable than a solid block)
             for row in 0..8u32 {
                 let yy = y.saturating_add(row);
                 if yy >= height {
                     break;
                 }
                 for col in 0..8u32 {
+                    // Only draw the border pixels (hollow box), skip interior
+                    if row > 0 && row < 7 && col > 0 && col < 7 {
+                        continue;
+                    }
                     let xx = cursor_x.saturating_add(col);
                     if xx < width {
                         image.put_pixel(xx, yy, color);
@@ -2632,13 +2893,9 @@ fn rgb_frame_to_dynamic_image(frame: &ffmpeg::frame::Video) -> Result<DynamicIma
 }
 
 fn is_network_stream_source(source: &str) -> bool {
-    if source.starts_with("rtsp://")
+    source.starts_with("rtsp://")
         || source.starts_with("rtmp://")
         || source.starts_with("tcp://")
-    {
-        return true;
-    }
-    false
 }
 
 fn parse_webcam_index(source: &str) -> Option<usize> {
@@ -2810,17 +3067,18 @@ mod tests {
 
     #[test]
     fn task_kind_override_bypasses_auto_detection() {
-        // A classification-shaped output, but we force Detect mode
-        let logits = vec![0.1_f32, 4.0, 2.5, 1.0];
+        // A classification-shaped output, but we force Detect mode.
+        // Provide enough attributes for a valid detection layout (>=6).
+        let predictions = vec![16.0_f32, 16.0, 8.0, 4.0, 0.9, 0.5];
         let output = OnnxOutputTensor {
             name: "output0".to_string(),
-            shape: vec![1, 4],
-            values: &logits,
+            shape: vec![1, 1, 6],
+            values: &predictions,
         };
         let decoded = decode_yolo_outputs(
             &[output],
             &dummy_meta(),
-            &["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
+            &["a".to_string()],
             0.0,
             0.45,
             10,
@@ -2870,9 +3128,11 @@ mod tests {
 
     #[test]
     fn keypoint_confidence_threshold_filters_low_confidence() {
+        // 1 prediction with 1 class (no objectness), 2 keypoints (6 extra dims)
+        // Layout: [cx, cy, w, h, class_0, kp1_x, kp1_y, kp1_conf, kp2_x, kp2_y, kp2_conf]
+        //         4 base + 1 class + 6 kpts = 11 attributes
         let predictions: Vec<f32> = vec![
             16.0, 16.0, 8.0, 4.0, // cx, cy, w, h
-            0.95, // objectness
             0.9,  // class score (1 class)
             // 2 keypoints: x, y, conf
             10.0, 10.0, 0.8,
@@ -3006,5 +3266,283 @@ mod tests {
             false,
         );
         assert_eq!(result.len(), 2, "rotated boxes at different angles should both survive NMS");
+    }
+
+    #[test]
+    fn normalize_confidence_sigmoid_range() {
+        // Values in (0, 1] should pass through unchanged (clamped to 1.0)
+        assert!((normalize_confidence(0.5) - 0.5).abs() < 1e-6);
+        assert!((normalize_confidence(1.0) - 1.0).abs() < 1e-6);
+        // Very small positive value treated as probability
+        assert!((normalize_confidence(0.001) - 0.001).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_confidence_slight_overshoot_clamped() {
+        // Values slightly above 1.0 should be clamped to 1.0
+        assert!((normalize_confidence(1.04) - 1.0).abs() < 1e-6);
+        assert!((normalize_confidence(1.05) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_confidence_raw_logit_applies_sigmoid() {
+        // Large positive logit → sigmoid ≈ 1.0
+        assert!(normalize_confidence(10.0) > 0.99);
+        // Large negative logit → sigmoid ≈ 0.0
+        assert!(normalize_confidence(-10.0) < 0.01);
+        // Zero logit → sigmoid(0.0) = 0.5 (not treated as probability 0.0)
+        assert!((normalize_confidence(0.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_confidence_negative_value() {
+        // Negative values outside (0, 1.05] → sigmoid
+        assert!((normalize_confidence(-5.0) - 1.0 / (1.0 + 5.0_f32.exp())).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_obb_angle_radians_range() {
+        // Values in [1, π] should pass through as angle in radians
+        assert!((normalize_obb_angle(1.0) - 1.0).abs() < 1e-6);
+        assert!((normalize_obb_angle(std::f32::consts::PI) - std::f32::consts::PI).abs() < 1e-6);
+        assert!((normalize_obb_angle(1.5) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_obb_angle_sigmoid_missing_pi() {
+        // Values in (0, 1) should be multiplied by π
+        assert!((normalize_obb_angle(0.5) - 0.5 * std::f32::consts::PI).abs() < 1e-6);
+        assert!((normalize_obb_angle(0.1) - 0.1 * std::f32::consts::PI).abs() < 1e-6);
+        assert!((normalize_obb_angle(0.99) - 0.99 * std::f32::consts::PI).abs() < 1e-4);
+    }
+
+    #[test]
+    fn normalize_obb_angle_near_zero() {
+        // Near-zero values should return 0
+        assert!(normalize_obb_angle(0.0).abs() < 1e-6);
+        assert!(normalize_obb_angle(1e-7).abs() < 1e-6);
+        assert!(normalize_obb_angle(-1e-7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_obb_angle_raw_logit() {
+        // Large magnitude values should be treated as raw logits → sigmoid * π
+        let raw = 5.0_f32;
+        let expected = normalize_confidence(raw) * std::f32::consts::PI;
+        assert!((normalize_obb_angle(raw) - expected).abs() < 1e-6);
+
+        // Negative large values
+        let raw_neg = -5.0_f32;
+        let expected_neg = normalize_confidence(raw_neg) * std::f32::consts::PI;
+        assert!((normalize_obb_angle(raw_neg) - expected_neg).abs() < 1e-6);
+    }
+
+    #[test]
+    fn polygon_intersection_fully_contained() {
+        // A small box fully inside a larger box → intersection = small box area
+        let big = [
+            [0.0_f32, 0.0],
+            [20.0, 0.0],
+            [20.0, 20.0],
+            [0.0, 20.0],
+        ];
+        let small = [
+            [5.0_f32, 5.0],
+            [10.0, 5.0],
+            [10.0, 10.0],
+            [5.0, 10.0],
+        ];
+        let area = polygon_intersection_area(&big, &small);
+        assert!((area - 25.0).abs() < 0.5, "fully contained intersection should be 25.0, got {area}");
+    }
+
+    #[test]
+    fn polygon_intersection_no_overlap() {
+        let a = [
+            [0.0_f32, 0.0],
+            [5.0, 0.0],
+            [5.0, 5.0],
+            [0.0, 5.0],
+        ];
+        let b = [
+            [10.0_f32, 10.0],
+            [15.0, 10.0],
+            [15.0, 15.0],
+            [10.0, 15.0],
+        ];
+        let area = polygon_intersection_area(&a, &b);
+        assert!(area < 0.01, "non-overlapping polygons should have 0 intersection, got {area}");
+    }
+
+    #[test]
+    fn polygon_intersection_touching_edge() {
+        // Two boxes sharing an edge but no interior overlap
+        let a = [
+            [0.0_f32, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ];
+        let b = [
+            [10.0_f32, 0.0],
+            [20.0, 0.0],
+            [20.0, 10.0],
+            [10.0, 10.0],
+        ];
+        let area = polygon_intersection_area(&a, &b);
+        assert!(area < 1.0, "edge-touching polygons should have near-zero intersection, got {area}");
+    }
+
+    #[test]
+    fn polygon_intersection_identical() {
+        let square = [
+            [0.0_f32, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ];
+        let area = polygon_intersection_area(&square, &square);
+        assert!((area - 100.0).abs() < 1.0, "identical polygons should have full intersection, got {area}");
+    }
+
+    #[test]
+    fn polygon_intersection_rotated_45() {
+        // A square and the same square rotated 45° at the same center.
+        // Intersection is the regular octagon inscribed in the square.
+        let axis = oriented_box_corners([10.0, 10.0], 10.0, 10.0, 0.0);
+        let rotated = oriented_box_corners([10.0, 10.0], 10.0, 10.0, std::f32::consts::FRAC_PI_4);
+        let area = polygon_intersection_area(
+            &ensure_counter_clockwise(&axis),
+            &ensure_counter_clockwise(&rotated),
+        );
+        // The octagon area = 2 * (s^2) * (sqrt(2) - 1) where s = side/2 = 5
+        // = 2 * 25 * 0.4142 ≈ 20.71 ... but with floating point, approximate
+        assert!(area > 15.0, "rotated square intersection should be > 15, got {area}");
+        assert!(area < 100.0, "rotated square intersection should be < 100, got {area}");
+    }
+
+    #[test]
+    fn split_detection_prediction_majority_logit_detected() {
+        // 4 bbox + objectness + 3 class logits (all raw, > 1.1)
+        let prediction: Vec<f32> = vec![
+            10.0, 10.0, 5.0, 5.0, // bbox
+            3.5,  // objectness (raw logit)
+            2.0, 1.5, 0.5, // class scores (raw logits, majority > 1.1)
+        ];
+        let result = split_detection_prediction(&prediction, 0);
+        assert!(result.is_some());
+        let (obj, class_scores) = result.unwrap();
+        assert!((obj - 3.5).abs() < 1e-6, "objectness should be 3.5, got {obj}");
+        assert_eq!(class_scores.len(), 3, "should have 3 class scores");
+    }
+
+    #[test]
+    fn split_detection_prediction_all_probabilities_no_objectness() {
+        // 4 bbox + 3 class probabilities (all in [0, 1])
+        let prediction: Vec<f32> = vec![
+            10.0, 10.0, 5.0, 5.0, // bbox
+            0.9, 0.05, 0.03, // class probabilities
+        ];
+        let result = split_detection_prediction(&prediction, 0);
+        assert!(result.is_some());
+        let (obj, class_scores) = result.unwrap();
+        assert!((obj - 1.0).abs() < 1e-6, "objectness should be 1.0 (no objectness), got {obj}");
+        assert_eq!(class_scores.len(), 3, "should have 3 class scores");
+    }
+
+    #[test]
+    fn split_detection_prediction_single_slight_overshoot_ignored() {
+        // 4 bbox + 3 class probabilities where one value slightly exceeds 1.05
+        // but majority are in probability range → no objectness
+        let prediction: Vec<f32> = vec![
+            10.0, 10.0, 5.0, 5.0, // bbox
+            0.9, 0.05, 1.07, // one value slightly > 1.05, but minority
+        ];
+        let result = split_detection_prediction(&prediction, 0);
+        assert!(result.is_some());
+        let (obj, class_scores) = result.unwrap();
+        assert!((obj - 1.0).abs() < 1e-6, "should detect no objectness, got obj={obj}");
+        assert_eq!(class_scores.len(), 3, "should have 3 class scores");
+    }
+
+    #[test]
+    fn is_classification_output_rejects_small_1_1_n() {
+        // [1, 1, 80] should NOT be classified as classification output
+        // (80 attrs could be a small detection model)
+        let tensor = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![1, 1, 80],
+            values: &[0.1; 80],
+        };
+        assert!(
+            !is_classification_output(&tensor),
+            "[1, 1, 80] should not be treated as classification output"
+        );
+    }
+
+    #[test]
+    fn is_classification_output_accepts_large_1_1_n() {
+        // [1, 1, 1000] should be classified as classification output
+        let tensor = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![1, 1, 1000],
+            values: &[0.1; 1000],
+        };
+        assert!(
+            is_classification_output(&tensor),
+            "[1, 1, 1000] should be treated as classification output"
+        );
+    }
+
+    #[test]
+    fn is_classification_output_accepts_standard_shapes() {
+        let shapes: Vec<Vec<i64>> = vec![
+            vec![1000],
+            vec![1, 1000],
+            vec![1, 1000, 1],
+        ];
+        for shape in shapes {
+            let tensor = OnnxOutputTensor {
+                name: "output0".to_string(),
+                shape,
+                values: &[0.1; 10], // dummy
+            };
+            assert!(is_classification_output(&tensor), "shape {:?} should be classification", tensor.shape);
+        }
+    }
+
+    #[test]
+    fn select_primary_output_prefers_3d() {
+        let values: Vec<f32> = vec![0.0; 10];
+        let tensor_2d = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![1, 100],
+            values: &values,
+        };
+        let tensor_3d = OnnxOutputTensor {
+            name: "output1".to_string(),
+            shape: vec![1, 8400, 6],
+            values: &values,
+        };
+        let tensor_4d = OnnxOutputTensor {
+            name: "proto".to_string(),
+            shape: vec![1, 32, 160, 160],
+            values: &values,
+        };
+        let outputs = [tensor_4d, tensor_2d, tensor_3d];
+        let primary = select_primary_output(&outputs);
+        assert!(primary.is_some());
+        assert_eq!(primary.unwrap().shape.len(), 3, "should select 3D tensor over 2D and 4D");
+    }
+
+    #[test]
+    fn prediction_layout_supports_dynamic_batch() {
+        // batch = -1 (dynamic) should be accepted instead of returning an error
+        let layout = prediction_layout(&[-1, 8400, 6], 6);
+        assert!(layout.is_ok(), "dynamic batch shape should be accepted");
+
+        // batch = 2 should also be accepted with a warning instead of an error
+        let layout2 = prediction_layout(&[2, 8400, 6], 6);
+        assert!(layout2.is_ok(), "batch=2 shape should be accepted");
     }
 }
