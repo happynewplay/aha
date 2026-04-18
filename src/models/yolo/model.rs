@@ -75,6 +75,10 @@ impl YoloResults {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
+    pub fn latency_ms(&self) -> f32 {
+        self.speed.preprocess_ms + self.speed.inference_ms + self.speed.postprocess_ms
+    }
+
     pub fn save_txt(&self, path: &str) -> Result<()> {
         let content = self
             .boxes

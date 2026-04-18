@@ -34,6 +34,7 @@ pub struct YoloExecOptions {
     pub batch_size: Option<usize>,
     pub max_frames: Option<usize>,
     pub frame_stride: Option<usize>,
+    pub stream_log_every: Option<usize>,
 }
 
 impl YoloExec {
@@ -111,10 +112,34 @@ impl YoloExec {
 
         let predict_start = Instant::now();
         let mut frame_count = 0_usize;
+        let stream_log_every = options.stream_log_every.unwrap_or(30).max(1);
+        let mut latency_total_ms = 0.0_f32;
         model.predict_stream_with_options(source, &predict_options, |result| {
             frame_count += 1;
+            let frame_latency_ms = result.latency_ms();
+            latency_total_ms += frame_latency_ms;
+
             let frame_json = YoloGenerateModel::results_to_json(std::slice::from_ref(result))?;
             println!("{}", frame_json);
+
+            if frame_count.is_multiple_of(stream_log_every) {
+                let elapsed = predict_start.elapsed().as_secs_f64();
+                let fps = if elapsed > 0.0 {
+                    frame_count as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let avg_latency_ms = latency_total_ms as f64 / frame_count as f64;
+                eprintln!(
+                    "[yolo-stream] frames={} fps={:.2} latency_ms(current={:.2}, avg={:.2}) detections={} path={}",
+                    frame_count,
+                    fps,
+                    frame_latency_ms,
+                    avg_latency_ms,
+                    result.boxes.len(),
+                    result.path,
+                );
+            }
 
             if let Some(output_path) = output {
                 persist_stream_result(result, &frame_json, output_path, frame_count)?;
@@ -134,6 +159,22 @@ impl YoloExec {
             predict_start.elapsed()
         );
         println!("Processed stream frames: {}", frame_count);
+        if frame_count > 0 {
+            let elapsed = predict_start.elapsed().as_secs_f64();
+            let fps = if elapsed > 0.0 {
+                frame_count as f64 / elapsed
+            } else {
+                0.0
+            };
+            let avg_latency_ms = latency_total_ms as f64 / frame_count as f64;
+            eprintln!(
+                "[yolo-stream] summary frames={} fps={:.2} latency_ms(avg={:.2}) total_elapsed_s={:.2}",
+                frame_count,
+                fps,
+                avg_latency_ms,
+                elapsed,
+            );
+        }
 
         if let Some(viewer) = viewer.take() {
             viewer.finish()?;

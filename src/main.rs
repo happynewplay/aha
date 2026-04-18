@@ -287,6 +287,10 @@ struct RunArgs {
     /// Keep one frame every N frames in stream mode (YOLO only)
     #[arg(long)]
     frame_stride: Option<usize>,
+
+    /// Log realtime stream FPS/latency every N processed frames (YOLO only)
+    #[arg(long)]
+    stream_log_every: Option<usize>,
 }
 
 /// Arguments for the 'delete' subcommand (delete model from default location)
@@ -510,6 +514,7 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
                 batch_size: args.batch_size,
                 max_frames: args.max_frames,
                 frame_stride: args.frame_stride,
+                stream_log_every: args.stream_log_every,
             };
             YoloExec::run_with_spec_and_options(
                 &args.input,
@@ -1156,6 +1161,8 @@ mod tests {
             "120",
             "--frame-stride",
             "2",
+            "--stream-log-every",
+            "15",
         ])
         .expect("yolo run args should parse");
 
@@ -1174,6 +1181,7 @@ mod tests {
         assert_eq!(args.batch_size, Some(8));
         assert_eq!(args.max_frames, Some(120));
         assert_eq!(args.frame_stride, Some(2));
+        assert_eq!(args.stream_log_every, Some(15));
     }
 
     #[test]
