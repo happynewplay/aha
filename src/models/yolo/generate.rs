@@ -9,10 +9,18 @@ use crate::models::LoadSpec;
 use super::config::YoloConfig;
 use super::model::{YoloModel, YoloPredictOptions, YoloResults};
 
-/// YOLO vision model adapter. Note: YOLO is a vision model and does NOT
-/// support the `GenerateModel` chat-completion trait. It is registered
-/// as a `GenerateModel` only because the model registry requires a uniform
-/// interface. Calling `generate()` or `generate_stream()` will return an error.
+/// YOLO vision model adapter.
+///
+/// # Interface segregation note
+///
+/// YOLO is a vision model and does NOT support the `GenerateModel` chat-completion
+/// trait. It is registered as a `GenerateModel` only because the current model
+/// registry requires a uniform interface. Calling `generate()` or `generate_stream()`
+/// will always return a descriptive error.
+///
+/// **TODO**: The model registry should be refactored to support heterogeneous
+/// model interfaces (e.g. a separate `VisionModel` trait) so that YOLO does not
+/// need to implement an incompatible trait. See also: <https://en.wikipedia.org/wiki/Interface_segregation_principle>
 pub struct YoloGenerateModel {
     backend: YoloModel,
 }

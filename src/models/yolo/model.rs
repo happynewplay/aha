@@ -1,11 +1,9 @@
 #[cfg(feature = "ffmpeg")]
 use std::sync::OnceLock;
-#[cfg(feature = "ffmpeg")]
-use std::sync::atomic::Ordering;
 use std::{
     borrow::Cow,
     path::Path,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
     thread,
     time::Instant,
 };
@@ -708,9 +706,12 @@ impl YoloModel {
         } else {
             let workers = options.workers.max(1);
             if workers == 1 || sources.len() <= 1 {
-                self.predict_sequential(sources, options.top_k)?
+                self.predict_sequential(sources, options.top_k, options.stop_flag.as_ref().map(|v| v.as_ref()))?
             } else {
-                self.predict_parallel(sources, workers, options.chunk_size.max(1), options.top_k)?
+                self.predict_parallel(
+                    sources, workers, options.chunk_size.max(1), options.top_k,
+                    options.stop_flag.clone(),
+                )?
             }
         };
 
@@ -785,11 +786,15 @@ impl YoloModel {
         &mut self,
         sources: Vec<ResolvedImageSource>,
         top_k: Option<usize>,
+        stop_flag: Option<&AtomicBool>,
     ) -> Result<Vec<YoloResults>> {
         // NOTE: Each image is inferred individually with batch_size=1 to the ONNX
         // session because the model input shape is fixed at [1,3,H,W].
         let mut results = Vec::with_capacity(sources.len());
         for item in sources {
+            if stop_flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                break;
+            }
             results.push(self.backend.predict(&item, &self.config, top_k)?);
         }
         Ok(results)
@@ -801,6 +806,7 @@ impl YoloModel {
         workers: usize,
         chunk_size: usize,
         top_k: Option<usize>,
+        stop_flag: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<YoloResults>> {
         let indexed_sources = sources.into_iter().enumerate().collect::<Vec<_>>();
         let actual_chunk = chunk_size.max(indexed_sources.len().div_ceil(workers).max(1));
@@ -810,9 +816,19 @@ impl YoloModel {
             .collect::<Vec<_>>();
 
         // Try to reuse backends from the pool first, only creating new ones
-        // when the pool doesn't have enough.
+        // when the pool doesn't have enough. If the mutex is poisoned (a
+        // previous thread panicked while holding the lock), recover it but
+        // discard the stale backends — they may be in an inconsistent state.
         let needed = grouped.len();
-        let mut pool = self.backend_pool.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pool = match self.backend_pool.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                // Poisoned mutex: recover access but clear stale data
+                let mut guard = e.into_inner();
+                guard.clear();
+                guard
+            }
+        };
         let reuse_count = needed.min(pool.len());
         let mut backends: Vec<YoloOnnxBackend> = pool.drain(..reuse_count).collect();
         drop(pool); // Release lock before expensive ONNX session creation.
@@ -825,15 +841,20 @@ impl YoloModel {
         let used_backends = thread::scope(|scope| -> Result<Vec<YoloOnnxBackend>> {
             let mut handles = Vec::with_capacity(grouped.len());
             let mut backend_iter = backends.into_iter();
+            let stop = stop_flag.clone();
             for group in grouped.into_iter() {
                 let mut backend = backend_iter
                     .next()
                     .ok_or_else(|| anyhow!("insufficient ONNX backends for parallel inference"))?;
                 let config = self.config.clone();
                 let top_k = top_k;
+                let stop = stop.clone();
                 handles.push(scope.spawn(move || -> Result<(Vec<(usize, YoloResults)>, YoloOnnxBackend)> {
                     let mut partial = Vec::with_capacity(group.len());
                     for (idx, item) in group {
+                        if stop.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+                            break;
+                        }
                         partial.push((idx, backend.predict(&item, &config, top_k)?));
                     }
                     Ok((partial, backend))
@@ -842,6 +863,13 @@ impl YoloModel {
 
             let mut returned_backends = Vec::with_capacity(handles.len());
             for handle in handles {
+                // Check stop flag before waiting for each handle
+                if stop_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+                    // Don't wait for remaining handles; collect what we have.
+                    // Note: spawned threads will still finish their current
+                    // prediction but skip remaining items in their chunk.
+                    break;
+                }
                 let (partial, backend) = handle
                     .join()
                     .map_err(|_| anyhow!("yolo worker thread panicked"))??;
@@ -852,7 +880,15 @@ impl YoloModel {
         })?;
 
         // Return backends to the pool for reuse by subsequent calls.
-        let mut pool = self.backend_pool.lock().unwrap_or_else(|e| e.into_inner());
+        // Recover from poisoned mutex if needed (clear stale data first).
+        let mut pool = match self.backend_pool.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                let mut guard = e.into_inner();
+                guard.clear();
+                guard
+            }
+        };
         pool.extend(used_backends);
 
         joined.sort_by_key(|(idx, _)| *idx);
@@ -1297,50 +1333,62 @@ fn try_decode_yolo_segment_output(
     max_detections: usize,
     nms_class_agnostic: bool,
 ) -> Result<Option<DecodedYoloOutput>> {
-    let Some(mask_dim) = infer_proto_channels(&proto.shape) else {
+    let channel_candidates = infer_proto_channel_candidates(&proto.shape);
+    if channel_candidates.is_empty() {
         return Ok(None);
-    };
-    let layout = prediction_layout(&tensor.shape, 6)?;
-    let Some(aux_layout) = infer_fixed_extra_layout(layout.attr_count, class_names.len(), mask_dim) else {
-        return Ok(None);
-    };
-
-    let mut candidates = Vec::new();
-    for pred_index in 0..layout.pred_count {
-        let prediction = prediction_at(tensor.values, &layout, pred_index);
-        if let Some((detection, coeffs)) = decode_segment_prediction(
-            &prediction,
-            meta,
-            class_names,
-            conf_threshold,
-            aux_layout,
-        ) {
-            candidates.push((detection, coeffs));
-        }
     }
+    let layout = prediction_layout(&tensor.shape, 6)?;
 
-    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections, nms_class_agnostic);
-    if selected.is_empty() {
+    // Try each candidate channel count until one produces a valid aux layout
+    // and at least one detection. This handles ambiguity when dim1 == dim3
+    // in the proto shape (e.g. [1, 32, 32, 32]).
+    for mask_dim in channel_candidates {
+        let Some(aux_layout) = infer_fixed_extra_layout(layout.attr_count, class_names.len(), mask_dim) else {
+            continue;
+        };
+
+        let mut candidates = Vec::new();
+        for pred_index in 0..layout.pred_count {
+            let prediction = prediction_at(tensor.values, &layout, pred_index);
+            if let Some((detection, coeffs)) = decode_segment_prediction(
+                &prediction,
+                meta,
+                class_names,
+                conf_threshold,
+                aux_layout,
+            ) {
+                candidates.push((detection, coeffs));
+            }
+        }
+
+        let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections, nms_class_agnostic);
+        if selected.is_empty() {
+            // This candidate produced no detections — still a valid segment layout,
+            // just no confident predictions. Return empty segment result.
+            return Ok(Some(DecodedYoloOutput {
+                task: YoloTaskKind::Segment,
+                ..Default::default()
+            }));
+        }
+
+        let mut boxes = Vec::with_capacity(selected.len());
+        let mut masks = Vec::with_capacity(selected.len());
+        for (detection, coeffs) in selected {
+            let mask = decode_mask_from_proto(proto, &coeffs, meta, &detection.xyxy)
+                .unwrap_or_else(|_| decode_rect_mask(meta, &detection.xyxy));
+            boxes.push(detection);
+            masks.push(mask);
+        }
         return Ok(Some(DecodedYoloOutput {
             task: YoloTaskKind::Segment,
+            boxes,
+            masks,
             ..Default::default()
         }));
     }
 
-    let mut boxes = Vec::with_capacity(selected.len());
-    let mut masks = Vec::with_capacity(selected.len());
-    for (detection, coeffs) in selected {
-        let mask = decode_mask_from_proto(proto, &coeffs, meta, &detection.xyxy)
-            .unwrap_or_else(|_| decode_rect_mask(meta, &detection.xyxy));
-        boxes.push(detection);
-        masks.push(mask);
-    }
-    Ok(Some(DecodedYoloOutput {
-        task: YoloTaskKind::Segment,
-        boxes,
-        masks,
-        ..Default::default()
-    }))
+    // No candidate channel count produced a valid layout
+    Ok(None)
 }
 
 fn try_decode_yolo_obb_output(
@@ -1475,6 +1523,16 @@ fn is_probable_obb_output(tensor: &OnnxOutputTensor<'_>) -> bool {
         || name.contains("xywhr")
 }
 
+/// Maximum plausible attribute count for YOLO detection outputs.
+/// Detection attributes include 4 bbox coords + optional objectness + class scores
+/// + possible extras (mask coeffs, keypoint dims, angle). Typical ranges:
+/// - Detect: 4 + ~80 classes = ~84
+/// - Segment: 4 + ~80 + 32 mask coeffs = ~116
+/// - Pose: 4 + ~80 + 17×3 keypoints = ~135
+/// - OBB: 4 + ~80 + 1 angle = ~85
+/// 300 provides comfortable headroom for all known variants.
+const MAX_PLAUSIBLE_ATTR_COUNT: usize = 300;
+
 fn prediction_layout(shape: &[i64], min_attr_count: usize) -> Result<PredictionLayout> {
     if shape.len() != 3 {
         return Err(anyhow!("unsupported yolo output shape: {:?}", shape));
@@ -1493,11 +1551,42 @@ fn prediction_layout(shape: &[i64], min_attr_count: usize) -> Result<PredictionL
     }
     let dim1 = shape[1].max(1) as usize;
     let dim2 = shape[2].max(1) as usize;
-    let (pred_count, attr_count, transposed) = if dim1 > dim2 && dim2 >= min_attr_count {
-        (dim2, dim1, true)
-    } else {
-        (dim1, dim2, false)
-    };
+
+    // Determine transposition from the output shape.
+    //
+    // YOLO outputs come in two layouts:
+    //   - Normal (non-transposed): [1, num_predictions, num_attrs]
+    //     e.g. YOLOv8 detect: [1, 8400, 84]
+    //   - Transposed: [1, num_attrs, num_predictions]
+    //     e.g. some YOLOv5 exports: [1, 85, 8400]
+    //
+    // The key insight is that attribute counts are small (6..~300) while
+    // prediction counts are large (typically 1000+). We use this to disambiguate:
+    //   - If dim2 is small (≤300) and dim1 is large (>300): normal layout
+    //   - If dim1 is small (≤300) and dim2 is large (>300): transposed layout
+    //   - Otherwise (both small or both large): default to normal layout
+    let (pred_count, attr_count, transposed) =
+        if dim2 >= min_attr_count && dim2 <= MAX_PLAUSIBLE_ATTR_COUNT && dim1 > MAX_PLAUSIBLE_ATTR_COUNT {
+            // dim1 is large (predictions), dim2 is small (attrs) → normal [1, preds, attrs]
+            (dim1, dim2, false)
+        } else if dim1 >= min_attr_count && dim1 <= MAX_PLAUSIBLE_ATTR_COUNT && dim2 > MAX_PLAUSIBLE_ATTR_COUNT {
+            // dim1 is small (attrs), dim2 is large (predictions) → transposed [1, attrs, preds]
+            (dim2, dim1, true)
+        } else if dim2 >= min_attr_count {
+            // Ambiguous (both dimensions within plausible range, or both large).
+            // Default to normal (non-transposed) layout, which is the standard
+            // for YOLOv8+ and most ONNX exports.
+            (dim1, dim2, false)
+        } else if dim1 >= min_attr_count {
+            // dim2 < min_attr_count, dim1 might be attrs → treat as transposed
+            (dim2, dim1, true)
+        } else {
+            return Err(anyhow!(
+                "unsupported yolo attribute count for shape {:?} (min_attr_count={})",
+                shape, min_attr_count
+            ));
+        };
+
     if attr_count < min_attr_count {
         return Err(anyhow!("unsupported yolo attribute count {attr_count} for shape {:?}", shape));
     }
@@ -1723,13 +1812,26 @@ fn decode_aux_prediction(
     })
 }
 
-fn infer_proto_channels(shape: &[i64]) -> Option<usize> {
+/// Return candidate channel counts for a 4D proto tensor.
+/// For NCHW `[1, C, H, W]` the channel count is dim1; for NHWC `[1, H, W, C]` it is dim3.
+/// When both dims differ, we return both candidates ordered by likelihood (smaller first,
+/// since channel counts are typically much smaller than spatial dimensions).
+/// When they are equal, we return a single candidate.
+fn infer_proto_channel_candidates(shape: &[i64]) -> Vec<usize> {
     if shape.len() != 4 {
-        return None;
+        return Vec::new();
     }
     let c_first = shape[1].max(1) as usize;
     let c_last = shape[3].max(1) as usize;
-    Some(c_first.min(c_last))
+    if c_first == c_last {
+        vec![c_first]
+    } else if c_first < c_last {
+        // NCHW is more likely (small dim1 = channels), but try both
+        vec![c_first, c_last]
+    } else {
+        // NHWC is more likely (small dim3 = channels), but try both
+        vec![c_last, c_first]
+    }
 }
 
 fn decode_rect_mask(meta: &LetterboxMeta, xyxy: &[f32; 4]) -> YoloMask {
@@ -1987,24 +2089,45 @@ fn decode_single_prediction(
         if conf < conf_threshold {
             return None;
         }
-        // len==6 format: [x, y, w, h, conf, cls_id]
-        // cls_id may carry a fractional part due to quantization, so round
-        // instead of truncating to handle values like 2.9999 → 3.
-        let cls = prediction[5].round().max(0.0) as usize;
-        // Clamp cls to valid range to avoid out-of-bounds when quantization
-        // produces values beyond the class count.
-        let cls = cls.min(class_names.len().saturating_sub(1));
-        let label = class_names
-            .get(cls)
-            .cloned()
-            .unwrap_or_else(|| cls.to_string());
-        return Some(YoloBox {
-            xywh: xyxy_to_xywh(xyxy),
-            xyxy,
-            conf,
-            cls,
-            label,
-        });
+        // len==6 format: typically [x, y, w, h, conf, cls_id]
+        // cls_id should be a non-negative integer (possibly with floating-point
+        // noise from quantization, e.g. 2.9999 → 3). Validate that the value
+        // is plausibly an integer class index before using it as such.
+        // If the value looks like a probability (0.0..=1.0) rather than an
+        // integer index, treat the prediction as single-class with that as
+        // the confidence and re-check against the threshold.
+        let cls_raw = prediction[5];
+        let rounded = cls_raw.round();
+        if rounded >= 0.0 && (cls_raw - rounded).abs() < 0.1 && (rounded as usize) < class_names.len().max(1) {
+            // Looks like a valid class index (close to an integer, in range)
+            let cls = (rounded as usize).min(class_names.len().saturating_sub(1));
+            let label = class_names
+                .get(cls)
+                .cloned()
+                .unwrap_or_else(|| cls.to_string());
+            return Some(YoloBox {
+                xywh: xyxy_to_xywh(xyxy),
+                xyxy,
+                conf,
+                cls,
+                label,
+            });
+        } else {
+            // Not a valid class index — could be a single-class format where
+            // element [5] is an additional score or probability. Treat as
+            // class 0 with the existing confidence.
+            let label = class_names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "0".to_string());
+            return Some(YoloBox {
+                xywh: xyxy_to_xywh(xyxy),
+                xyxy,
+                conf,
+                cls: 0,
+                label,
+            });
+        }
     }
 
     let (objectness, class_scores) = split_detection_prediction(prediction, class_names.len())?;
@@ -2550,8 +2673,21 @@ fn resolve_image_sources(
     if contains_glob_pattern(source) {
         let mut sources = Vec::new();
         for entry in glob(source)? {
-            let path = entry?;
-            sources.extend(resolve_local_path(&path, options)?);
+            let path = match entry {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[yolo] warning: glob entry failed: {e}, skipping");
+                    continue;
+                }
+            };
+            match resolve_local_path(&path, options) {
+                Ok(resolved) => sources.extend(resolved),
+                Err(e) => {
+                    // Skip unsupported files (e.g. non-image/non-video)
+                    // rather than failing the entire glob expansion.
+                    eprintln!("[yolo] warning: skipping {}: {e}", path.display());
+                }
+            }
         }
         return Ok(sources);
     }
@@ -3544,5 +3680,141 @@ mod tests {
         // batch = 2 should also be accepted with a warning instead of an error
         let layout2 = prediction_layout(&[2, 8400, 6], 6);
         assert!(layout2.is_ok(), "batch=2 shape should be accepted");
+    }
+
+    #[test]
+    fn prediction_layout_yolov8_normal_not_transposed() {
+        // YOLOv8 standard output [1, 8400, 84] should be detected as normal (non-transposed)
+        let layout = prediction_layout(&[1, 8400, 84], 6).unwrap();
+        assert_eq!(layout.pred_count, 8400, "YOLOv8 [1,8400,84] pred_count should be 8400");
+        assert_eq!(layout.attr_count, 84, "YOLOv8 [1,8400,84] attr_count should be 84");
+        assert!(!layout.transposed, "YOLOv8 [1,8400,84] should NOT be transposed");
+    }
+
+    #[test]
+    fn prediction_layout_yolov5_transposed() {
+        // YOLOv5 transposed output [1, 85, 8400] should be detected as transposed
+        let layout = prediction_layout(&[1, 85, 8400], 6).unwrap();
+        assert_eq!(layout.pred_count, 8400, "YOLOv5 [1,85,8400] pred_count should be 8400");
+        assert_eq!(layout.attr_count, 85, "YOLOv5 [1,85,8400] attr_count should be 85");
+        assert!(layout.transposed, "YOLOv5 [1,85,8400] should be transposed");
+    }
+
+    #[test]
+    fn prediction_layout_yolov8_segment_normal() {
+        // YOLOv8 segment output [1, 8400, 116] should be normal
+        let layout = prediction_layout(&[1, 8400, 116], 6).unwrap();
+        assert_eq!(layout.pred_count, 8400);
+        assert_eq!(layout.attr_count, 116);
+        assert!(!layout.transposed);
+    }
+
+    #[test]
+    fn prediction_layout_yolov5_non_transposed() {
+        // YOLOv5 non-transposed output [1, 25200, 85] should be normal
+        let layout = prediction_layout(&[1, 25200, 85], 6).unwrap();
+        assert_eq!(layout.pred_count, 25200);
+        assert_eq!(layout.attr_count, 85);
+        assert!(!layout.transposed);
+    }
+
+    #[test]
+    fn prediction_layout_small_ambiguous_defaults_normal() {
+        // Small ambiguous shape [1, 20, 6] — both dims within plausible range,
+        // should default to normal (non-transposed)
+        let layout = prediction_layout(&[1, 20, 6], 6).unwrap();
+        assert_eq!(layout.pred_count, 20);
+        assert_eq!(layout.attr_count, 6);
+        assert!(!layout.transposed);
+    }
+
+    #[test]
+    fn prediction_layout_yolov8_obb_normal() {
+        // YOLOv8 OBB output [1, 8400, 85] should be normal
+        let layout = prediction_layout(&[1, 8400, 85], 6).unwrap();
+        assert_eq!(layout.pred_count, 8400);
+        assert_eq!(layout.attr_count, 85);
+        assert!(!layout.transposed);
+    }
+
+    #[test]
+    fn prediction_layout_yolov8_pose_normal() {
+        // YOLOv8 pose output [1, 8400, 56] should be normal
+        let layout = prediction_layout(&[1, 8400, 56], 6).unwrap();
+        assert_eq!(layout.pred_count, 8400);
+        assert_eq!(layout.attr_count, 56);
+        assert!(!layout.transposed);
+    }
+
+    #[test]
+    fn decode_single_prediction_len6_valid_cls_id() {
+        // len==6 with valid integer class ID
+        let prediction: Vec<f32> = vec![16.0, 16.0, 8.0, 4.0, 0.9, 2.0];
+        let result = decode_single_prediction(
+            &prediction,
+            &dummy_meta(),
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+            0.5,
+        );
+        assert!(result.is_some());
+        let box_result = result.unwrap();
+        assert_eq!(box_result.cls, 2);
+        assert_eq!(box_result.label, "c");
+    }
+
+    #[test]
+    fn decode_single_prediction_len6_quantized_cls_id() {
+        // len==6 with quantized class ID (2.9999 → 3)
+        let prediction: Vec<f32> = vec![16.0, 16.0, 8.0, 4.0, 0.9, 2.9999];
+        let result = decode_single_prediction(
+            &prediction,
+            &dummy_meta(),
+            &["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
+            0.5,
+        );
+        assert!(result.is_some());
+        let box_result = result.unwrap();
+        assert_eq!(box_result.cls, 3);
+        assert_eq!(box_result.label, "d");
+    }
+
+    #[test]
+    fn decode_single_prediction_len6_non_integer_falls_back_to_class0() {
+        // len==6 where prediction[5] is clearly not an integer class ID (0.85)
+        let prediction: Vec<f32> = vec![16.0, 16.0, 8.0, 4.0, 0.9, 0.85];
+        let result = decode_single_prediction(
+            &prediction,
+            &dummy_meta(),
+            &["cat".to_string(), "dog".to_string()],
+            0.5,
+        );
+        assert!(result.is_some());
+        let box_result = result.unwrap();
+        assert_eq!(box_result.cls, 0, "non-integer cls value should fall back to class 0");
+        assert_eq!(box_result.label, "cat");
+    }
+
+    #[test]
+    fn infer_proto_channel_candidates_nchw() {
+        // Standard NCHW proto: [1, 32, 160, 160] — dim1=32 ≠ dim3=160
+        // Should return both candidates, smaller first (NCHW more likely)
+        let candidates = infer_proto_channel_candidates(&[1, 32, 160, 160]);
+        assert_eq!(candidates, vec![32, 160], "NCHW with distinct dims should return both candidates");
+        assert_eq!(candidates[0], 32, "first candidate should be 32 (NCHW channel dim)");
+    }
+
+    #[test]
+    fn infer_proto_channel_candidates_nhwc() {
+        // NHWC proto: [1, 160, 160, 32]
+        let candidates = infer_proto_channel_candidates(&[1, 160, 160, 32]);
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0], 32, "first candidate should be 32 (smaller dim)");
+    }
+
+    #[test]
+    fn infer_proto_channel_candidates_ambiguous() {
+        // Ambiguous: [1, 32, 32, 32] — both dims are 32
+        let candidates = infer_proto_channel_candidates(&[1, 32, 32, 32]);
+        assert_eq!(candidates, vec![32], "equal dims should produce single candidate");
     }
 }

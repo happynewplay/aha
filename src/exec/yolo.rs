@@ -372,6 +372,11 @@ struct FrameViewer {
 
 impl FrameViewer {
     fn spawn() -> Result<Self> {
+        Self::spawn_with_framerate(30)
+    }
+
+    fn spawn_with_framerate(framerate: u32) -> Result<Self> {
+        let framerate_str = framerate.to_string();
         let mut child = Command::new("ffplay")
             .args([
                 "-hide_banner",
@@ -380,7 +385,7 @@ impl FrameViewer {
                 "-f",
                 "image2pipe",
                 "-framerate",
-                "24",
+                &framerate_str,
                 "-vcodec",
                 "png",
                 "-i",
