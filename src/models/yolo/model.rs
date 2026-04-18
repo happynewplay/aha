@@ -25,20 +25,10 @@ use crate::{
     utils::{get_file_path, img_utils::load_image_from_url},
 };
 
-use super::config::YoloConfig;
+use super::config::{YoloConfig, YoloTaskKind};
 
 const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "avi", "mov", "mkv", "webm"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum YoloTaskKind {
-    #[default]
-    Detect,
-    Segment,
-    Pose,
-    Classify,
-    Obb,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct YoloKeypoint {
@@ -214,47 +204,31 @@ impl YoloResults {
     }
 
     pub fn save_txt(&self, path: &str) -> Result<()> {
+        let mut lines = Vec::new();
+        // Add task-type header for disambiguation
+        lines.push(format!("# task: {:?}", self.task));
         if !self.probs.is_empty() {
-            let content = self
-                .probs
-                .iter()
-                .map(|prediction| {
-                    format!(
-                        "{} {:.6} {}",
-                        prediction.cls, prediction.conf, prediction.label
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            std::fs::write(path, content)?;
-            return Ok(());
-        }
-        if !self.obb.is_empty() {
-            let content = self
-                .obb
-                .iter()
-                .map(|obb| {
-                    format!(
-                        "{} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
-                        obb.cls,
-                        obb.xywhr[0],
-                        obb.xywhr[1],
-                        obb.xywhr[2],
-                        obb.xywhr[3],
-                        obb.xywhr[4],
-                        obb.conf,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            std::fs::write(path, content)?;
-            return Ok(());
-        }
-        let content = self
-            .boxes
-            .iter()
-            .enumerate()
-            .map(|(index, detection)| {
+            for prediction in &self.probs {
+                lines.push(format!(
+                    "{} {:.6} {}",
+                    prediction.cls, prediction.conf, prediction.label
+                ));
+            }
+        } else if !self.obb.is_empty() {
+            for obb in &self.obb {
+                lines.push(format!(
+                    "{} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+                    obb.cls,
+                    obb.xywhr[0],
+                    obb.xywhr[1],
+                    obb.xywhr[2],
+                    obb.xywhr[3],
+                    obb.xywhr[4],
+                    obb.conf,
+                ));
+            }
+        } else {
+            for (index, detection) in self.boxes.iter().enumerate() {
                 let mut fields = vec![
                     detection.cls.to_string(),
                     format!("{:.6}", detection.xywh[0]),
@@ -283,12 +257,17 @@ impl YoloResults {
                         }
                     }
                 }
-                fields.join(" ")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(path, content)?;
+                lines.push(fields.join(" "));
+            }
+        }
+        std::fs::write(path, lines.join("\n"))?;
         Ok(())
+    }
+
+    /// Discard the original image to free memory. Useful after batch processing
+    /// when only the structured results (boxes, masks, etc.) are needed.
+    pub fn strip_images(&mut self) {
+        self.orig_img = None;
     }
 }
 
@@ -584,7 +563,10 @@ pub struct YoloModel {
 
 impl YoloModel {
     pub fn init_from_spec(spec: &LoadSpec) -> Result<Self> {
-        let config = YoloConfig::default();
+        Self::init_with_config(spec, YoloConfig::default())
+    }
+
+    pub fn init_with_config(spec: &LoadSpec, config: YoloConfig) -> Result<Self> {
         match spec.resolved_artifact() {
             ArtifactKind::Onnx => {
                 let onnx_path = spec
@@ -592,15 +574,33 @@ impl YoloModel {
                     .onnx_path
                     .as_deref()
                     .ok_or_else(|| anyhow!("onnx_path is required for yolo onnx"))?;
-                Ok(Self {
+                let mut model = Self {
                     backend: YoloOnnxBackend::load(onnx_path, &config)?,
                     config,
                     onnx_path: onnx_path.to_string(),
-                })
+                };
+                model.warmup()?;
+                Ok(model)
             }
             ArtifactKind::Auto => unreachable!("artifact kind should be resolved before init"),
             other => Err(anyhow!("yolo does not support artifact {:?}", other)),
         }
+    }
+
+    /// Run a single dummy inference to trigger ONNX session lazy initialization,
+    /// so that the first real prediction does not include the cold-start overhead.
+    fn warmup(&mut self) -> Result<()> {
+        let dummy_image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            self.config.image_size as u32,
+            self.config.image_size as u32,
+            Rgba([114, 114, 114, 255]),
+        ));
+        let source = ResolvedImageSource {
+            source: "__warmup__".to_string(),
+            image: dummy_image,
+        };
+        let _ = self.backend.predict(&source, &self.config, None)?;
+        Ok(())
     }
 
     pub fn predict(&mut self, source: &str) -> Result<Vec<YoloResults>> {
@@ -623,20 +623,28 @@ impl YoloModel {
             return Err(anyhow!("no supported image sources found for {}", source));
         }
 
-        if options.stream {
+        let mut results = if options.stream {
             let mut results = Vec::with_capacity(sources.len());
             for item in sources {
                 results.push(self.backend.predict(&item, &self.config, options.top_k)?);
             }
-            return Ok(results);
+            results
+        } else {
+            let workers = options.workers.max(1);
+            if workers == 1 || sources.len() <= 1 {
+                self.predict_sequential(sources, options.batch_size.max(1), options.top_k)?
+            } else {
+                self.predict_parallel(sources, workers, options.batch_size.max(1), options.top_k)?
+            }
+        };
+
+        if !self.config.keep_images {
+            for result in &mut results {
+                result.strip_images();
+            }
         }
 
-        let workers = options.workers.max(1);
-        if workers == 1 || sources.len() <= 1 {
-            return self.predict_sequential(sources, options.batch_size.max(1), options.top_k);
-        }
-
-        self.predict_parallel(sources, workers, options.batch_size.max(1), options.top_k)
+        Ok(results)
     }
 
     pub fn predict_stream_with_options<F>(
@@ -668,25 +676,7 @@ impl YoloModel {
     }
 
     pub fn results_to_json(results: &[YoloResults]) -> Result<String> {
-        let payload = results
-            .iter()
-            .map(|result| {
-                json!({
-                    "task": result.task,
-                    "boxes": result.boxes,
-                    "masks": result.masks,
-                    "keypoints": result.keypoints,
-                    "probs": result.probs,
-                    "obb": result.obb,
-                    "path": result.path,
-                    "names": result.names,
-                    "speed": result.speed,
-                    "width": result.width,
-                    "height": result.height,
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(serde_json::to_string_pretty(&payload)?)
+        Ok(serde_json::to_string_pretty(results)?)
     }
 
     pub fn results_to_coco_json(results: &[YoloResults]) -> Result<String> {
@@ -721,11 +711,13 @@ impl YoloModel {
         batch_size: usize,
         top_k: Option<usize>,
     ) -> Result<Vec<YoloResults>> {
+        // NOTE: Each image is inferred individually with batch_size=1 to the ONNX
+        // session because the model input shape is fixed at [1,3,H,W].
+        // The batch_size parameter controls chunking for progress reporting only.
+        let _ = batch_size;
         let mut results = Vec::with_capacity(sources.len());
-        for chunk in sources.chunks(batch_size) {
-            for item in chunk {
-                results.push(self.backend.predict(item, &self.config, top_k)?);
-            }
+        for item in sources {
+            results.push(self.backend.predict(&item, &self.config, top_k)?);
         }
         Ok(results)
     }
@@ -881,6 +873,9 @@ impl YoloOnnxBackend {
                 config.iou_threshold,
                 config.max_detections,
                 top_k,
+                config.task_kind,
+                config.nms_class_agnostic,
+                config.keypoint_confidence_threshold,
             )?;
             let postprocess_ms = postprocess_start.elapsed().as_secs_f32() * 1000.0;
             Ok(YoloResults {
@@ -966,10 +961,23 @@ fn decode_yolo_outputs(
     iou_threshold: f32,
     max_detections: usize,
     top_k: Option<usize>,
+    task_kind_override: Option<YoloTaskKind>,
+    nms_class_agnostic: bool,
+    keypoint_confidence_threshold: f32,
 ) -> Result<DecodedYoloOutput> {
     let primary = select_primary_output(outputs)
         .ok_or_else(|| anyhow!("yolo onnx output tensor list is empty"))?;
 
+    // If the user specified a task kind, use it directly (skip auto-detection).
+    if let Some(task) = task_kind_override {
+        return decode_by_task_kind(
+            task, outputs, primary, meta, class_names, conf_threshold,
+            iou_threshold, max_detections, top_k, nms_class_agnostic,
+            keypoint_confidence_threshold,
+        );
+    }
+
+    // Auto-detect task kind from output tensors.
     if is_classification_output(primary) {
         return decode_yolo_classify_output(
             primary,
@@ -989,6 +997,7 @@ fn decode_yolo_outputs(
             conf_threshold,
             iou_threshold,
             max_detections,
+            nms_class_agnostic,
         )? {
             return Ok(decoded);
         }
@@ -1001,6 +1010,8 @@ fn decode_yolo_outputs(
         conf_threshold,
         iou_threshold,
         max_detections,
+        nms_class_agnostic,
+        keypoint_confidence_threshold,
     )? {
         return Ok(decoded);
     }
@@ -1012,6 +1023,7 @@ fn decode_yolo_outputs(
         conf_threshold,
         iou_threshold,
         max_detections,
+        nms_class_agnostic,
     )? {
         return Ok(decoded);
     }
@@ -1023,12 +1035,84 @@ fn decode_yolo_outputs(
         conf_threshold,
         iou_threshold,
         max_detections,
+        nms_class_agnostic,
     )?;
     Ok(DecodedYoloOutput {
         task: YoloTaskKind::Detect,
         boxes,
         ..Default::default()
     })
+}
+
+/// Decode outputs with an explicitly specified task kind, bypassing auto-detection.
+fn decode_by_task_kind(
+    task: YoloTaskKind,
+    outputs: &[OnnxOutputTensor<'_>],
+    primary: &OnnxOutputTensor<'_>,
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    iou_threshold: f32,
+    max_detections: usize,
+    top_k: Option<usize>,
+    nms_class_agnostic: bool,
+    keypoint_confidence_threshold: f32,
+) -> Result<DecodedYoloOutput> {
+    match task {
+        YoloTaskKind::Classify => decode_yolo_classify_output(
+            primary, class_names, conf_threshold, top_k, max_detections,
+        ),
+        YoloTaskKind::Segment => {
+            let proto = find_mask_proto_output(outputs);
+            if let Some(proto) = proto {
+                try_decode_yolo_segment_output(
+                    primary, proto, meta, class_names, conf_threshold,
+                    iou_threshold, max_detections, nms_class_agnostic,
+                )
+                .map(|opt| opt.unwrap_or_else(|| DecodedYoloOutput {
+                    task: YoloTaskKind::Segment,
+                    ..Default::default()
+                }))
+            } else {
+                Ok(DecodedYoloOutput {
+                    task: YoloTaskKind::Segment,
+                    ..Default::default()
+                })
+            }
+        }
+        YoloTaskKind::Pose => {
+            try_decode_yolo_pose_output(
+                primary, meta, class_names, conf_threshold,
+                iou_threshold, max_detections, nms_class_agnostic,
+                keypoint_confidence_threshold,
+            )
+            .map(|opt| opt.unwrap_or_else(|| DecodedYoloOutput {
+                task: YoloTaskKind::Pose,
+                ..Default::default()
+            }))
+        }
+        YoloTaskKind::Obb => {
+            try_decode_yolo_obb_output(
+                primary, meta, class_names, conf_threshold,
+                iou_threshold, max_detections, nms_class_agnostic,
+            )
+            .map(|opt| opt.unwrap_or_else(|| DecodedYoloOutput {
+                task: YoloTaskKind::Obb,
+                ..Default::default()
+            }))
+        }
+        YoloTaskKind::Detect => {
+            let boxes = decode_yolo_detect_output(
+                primary, meta, class_names, conf_threshold,
+                iou_threshold, max_detections, nms_class_agnostic,
+            )?;
+            Ok(DecodedYoloOutput {
+                task: YoloTaskKind::Detect,
+                boxes,
+                ..Default::default()
+            })
+        }
+    }
 }
 
 fn decode_yolo_detect_output(
@@ -1038,6 +1122,7 @@ fn decode_yolo_detect_output(
     conf_threshold: f32,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
 ) -> Result<Vec<YoloBox>> {
     let layout = prediction_layout(&tensor.shape, 6)?;
     let mut candidates = Vec::new();
@@ -1054,6 +1139,7 @@ fn decode_yolo_detect_output(
         candidates,
         iou_threshold,
         max_detections,
+        nms_class_agnostic,
     ))
 }
 
@@ -1117,6 +1203,7 @@ fn try_decode_yolo_segment_output(
     conf_threshold: f32,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
 ) -> Result<Option<DecodedYoloOutput>> {
     let Some(mask_dim) = infer_proto_channels(&proto.shape) else {
         return Ok(None);
@@ -1140,7 +1227,7 @@ fn try_decode_yolo_segment_output(
         }
     }
 
-    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections);
+    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections, nms_class_agnostic);
     if selected.is_empty() {
         return Ok(Some(DecodedYoloOutput {
             task: YoloTaskKind::Segment,
@@ -1171,6 +1258,7 @@ fn try_decode_yolo_obb_output(
     conf_threshold: f32,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
 ) -> Result<Option<DecodedYoloOutput>> {
     if !is_probable_obb_output(tensor) {
         return Ok(None);
@@ -1194,7 +1282,7 @@ fn try_decode_yolo_obb_output(
         }
     }
 
-    let obb = non_max_suppression_obb(candidates, iou_threshold, max_detections);
+    let obb = non_max_suppression_obb(candidates, iou_threshold, max_detections, nms_class_agnostic);
     Ok(Some(DecodedYoloOutput {
         task: YoloTaskKind::Obb,
         obb,
@@ -1209,6 +1297,8 @@ fn try_decode_yolo_pose_output(
     conf_threshold: f32,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
+    keypoint_confidence_threshold: f32,
 ) -> Result<Option<DecodedYoloOutput>> {
     let layout = prediction_layout(&tensor.shape, 6)?;
     let Some(aux_layout) = infer_pose_aux_layout(layout.attr_count, class_names.len()) else {
@@ -1224,12 +1314,13 @@ fn try_decode_yolo_pose_output(
             class_names,
             conf_threshold,
             aux_layout,
+            keypoint_confidence_threshold,
         ) {
             candidates.push((detection, keypoints));
         }
     }
 
-    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections);
+    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections, nms_class_agnostic);
     let mut boxes = Vec::with_capacity(selected.len());
     let mut keypoints = Vec::with_capacity(selected.len());
     for (detection, points) in selected {
@@ -1407,6 +1498,7 @@ fn decode_pose_prediction(
     class_names: &[String],
     conf_threshold: f32,
     aux_layout: PredictionAuxLayout,
+    keypoint_confidence_threshold: f32,
 ) -> Option<(YoloBox, Vec<YoloKeypoint>)> {
     let detection = decode_aux_prediction(
         prediction,
@@ -1415,7 +1507,7 @@ fn decode_pose_prediction(
         conf_threshold,
         aux_layout,
     )?;
-    let keypoints = prediction[aux_layout.extra_start..]
+    let keypoints: Vec<YoloKeypoint> = prediction[aux_layout.extra_start..]
         .chunks_exact(3)
         .map(|chunk| {
             let [x, y] = restore_point(chunk[0], chunk[1], meta);
@@ -1425,7 +1517,8 @@ fn decode_pose_prediction(
                 conf: normalize_confidence(chunk[2]),
             }
         })
-        .collect::<Vec<_>>();
+        .filter(|kp| kp.conf >= keypoint_confidence_threshold)
+        .collect();
     Some((detection, keypoints))
 }
 
@@ -1610,11 +1703,14 @@ fn restore_point(x: f32, y: f32, meta: &LetterboxMeta) -> [f32; 2] {
 }
 
 fn normalize_obb_angle(value: f32) -> f32 {
+    // If the value is already within a reasonable angle range, keep it as-is.
     if value.abs() <= std::f32::consts::PI * 2.0 {
-        value
-    } else {
-        normalize_confidence(value) * std::f32::consts::FRAC_PI_2
+        return value;
     }
+    // For values that look like raw logits (large magnitude), apply sigmoid
+    // and then scale to [0, π]. This matches the Ultralytics convention where
+    // the angle output is sigmoid(angle_raw) * π when the raw value is unbounded.
+    normalize_confidence(value) * std::f32::consts::PI
 }
 
 fn oriented_box_corners(center: [f32; 2], width: f32, height: f32, angle: f32) -> [[f32; 2]; 4] {
@@ -1753,6 +1849,7 @@ fn non_max_suppression(
     detections: Vec<YoloBox>,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
 ) -> Vec<YoloBox> {
     let mut selected = Vec::new();
     let mut suppressed = vec![false; detections.len()];
@@ -1765,7 +1862,8 @@ fn non_max_suppression(
             if suppressed[candidate_index] {
                 continue;
             }
-            if detections[candidate_index].cls == current.cls
+            let same_class = detections[candidate_index].cls == current.cls;
+            if (nms_class_agnostic || same_class)
                 && intersection_over_union(&current.xyxy, &detections[candidate_index].xyxy) >= iou_threshold
             {
                 suppressed[candidate_index] = true;
@@ -1780,6 +1878,7 @@ fn non_max_suppression_obb(
     detections: Vec<YoloObb>,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
 ) -> Vec<YoloObb> {
     let mut selected = Vec::new();
     let mut suppressed = vec![false; detections.len()];
@@ -1792,11 +1891,12 @@ fn non_max_suppression_obb(
             if suppressed[candidate_index] {
                 continue;
             }
-            if detections[candidate_index].cls == current.cls
-                && intersection_over_union(&current.xyxy, &detections[candidate_index].xyxy)
-                    >= iou_threshold
-            {
-                suppressed[candidate_index] = true;
+            let same_class = detections[candidate_index].cls == current.cls;
+            if nms_class_agnostic || same_class {
+                let iou = rotated_iou(&current.corners, &detections[candidate_index].corners);
+                if iou >= iou_threshold {
+                    suppressed[candidate_index] = true;
+                }
             }
         }
         selected.push(current);
@@ -1808,6 +1908,7 @@ fn non_max_suppression_with_aux<T: Clone>(
     detections: Vec<(YoloBox, T)>,
     iou_threshold: f32,
     max_detections: usize,
+    nms_class_agnostic: bool,
 ) -> Vec<(YoloBox, T)> {
     let mut selected = Vec::new();
     let mut suppressed = vec![false; detections.len()];
@@ -1820,7 +1921,8 @@ fn non_max_suppression_with_aux<T: Clone>(
             if suppressed[candidate_index] {
                 continue;
             }
-            if detections[candidate_index].0.cls == current.0.cls
+            let same_class = detections[candidate_index].0.cls == current.0.cls;
+            if (nms_class_agnostic || same_class)
                 && intersection_over_union(&current.0.xyxy, &detections[candidate_index].0.xyxy)
                     >= iou_threshold
             {
@@ -1844,6 +1946,126 @@ fn intersection_over_union(left: &[f32; 4], right: &[f32; 4]) -> f32 {
     let right_area = (right[2] - right[0]).max(0.0) * (right[3] - right[1]).max(0.0);
     let union = left_area + right_area - inter;
     if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+/// Compute IoU for two oriented (rotated) bounding boxes using their corner polygons.
+/// Uses the Sutherland-Hodgman algorithm to clip one polygon against the other,
+/// then computes the intersection area from the clipped polygon.
+fn rotated_iou(corners_a: &[[f32; 2]; 4], corners_b: &[[f32; 2]; 4]) -> f32 {
+    let area_a = polygon_area(corners_a);
+    let area_b = polygon_area(corners_b);
+    if area_a <= 0.0 || area_b <= 0.0 {
+        return 0.0;
+    }
+    let inter = polygon_intersection_area(corners_a, corners_b);
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+/// Compute the signed area of a convex polygon using the shoelace formula.
+fn polygon_area(vertices: &[[f32; 2]; 4]) -> f32 {
+    let n = vertices.len();
+    let mut area = 0.0_f32;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += vertices[i][0] * vertices[j][1];
+        area -= vertices[j][0] * vertices[i][1];
+    }
+    area.abs() * 0.5
+}
+
+/// Compute the intersection area of two convex polygons using Sutherland-Hodgman clipping.
+/// Clips polygon `subject` against each edge of polygon `clip`, then computes the
+/// area of the resulting intersection polygon.
+fn polygon_intersection_area(
+    subject: &[[f32; 2]; 4],
+    clip: &[[f32; 2]; 4],
+) -> f32 {
+    let mut output: Vec<[f32; 2]> = subject.to_vec();
+    let clip_len = clip.len();
+
+    for i in 0..clip_len {
+        if output.is_empty() {
+            return 0.0;
+        }
+        let input = std::mem::take(&mut output);
+        let edge_start = clip[i];
+        let edge_end = clip[(i + 1) % clip_len];
+
+        for j in 0..input.len() {
+            let current = input[j];
+            let previous = input[(j + input.len() - 1) % input.len()];
+
+            let current_inside = is_left_of_edge(edge_start, edge_end, current);
+            let previous_inside = is_left_of_edge(edge_start, edge_end, previous);
+
+            match (previous_inside, current_inside) {
+                (true, true) => {
+                    output.push(current);
+                }
+                (true, false) => {
+                    if let Some(pt) = line_intersection(previous, current, edge_start, edge_end) {
+                        output.push(pt);
+                    }
+                }
+                (false, true) => {
+                    if let Some(pt) = line_intersection(previous, current, edge_start, edge_end) {
+                        output.push(pt);
+                    }
+                    output.push(current);
+                }
+                (false, false) => {}
+            }
+        }
+    }
+
+    if output.len() < 3 {
+        return 0.0;
+    }
+    shoelace_area(&output)
+}
+
+/// Test if point is on the left side (inside) of the directed edge from `start` to `end`.
+/// For a counter-clockwise polygon, "left" is inside. For clockwise, we use >= 0
+/// to handle both orientations.
+fn is_left_of_edge(edge_start: [f32; 2], edge_end: [f32; 2], point: [f32; 2]) -> bool {
+    let cross = (edge_end[0] - edge_start[0]) * (point[1] - edge_start[1])
+        - (edge_end[1] - edge_start[1]) * (point[0] - edge_start[0]);
+    cross >= 0.0
+}
+
+/// Compute the intersection point of two line segments (p1,p2) and (p3,p4).
+/// Returns None if the lines are parallel.
+fn line_intersection(
+    p1: [f32; 2],
+    p2: [f32; 2],
+    p3: [f32; 2],
+    p4: [f32; 2],
+) -> Option<[f32; 2]> {
+    let denom = (p1[0] - p2[0]) * (p3[1] - p4[1]) - (p1[1] - p2[1]) * (p3[0] - p4[0]);
+    if denom.abs() < 1e-10 {
+        return None;
+    }
+    let t = ((p1[0] - p3[0]) * (p3[1] - p4[1]) - (p1[1] - p3[1]) * (p3[0] - p4[0])) / denom;
+    Some([
+        p1[0] + t * (p2[0] - p1[0]),
+        p1[1] + t * (p2[1] - p1[1]),
+    ])
+}
+
+/// Shoelace formula for polygon area (variable vertex count).
+fn shoelace_area(vertices: &[[f32; 2]]) -> f32 {
+    let n = vertices.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0_f32;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += vertices[i][0] * vertices[j][1];
+        area -= vertices[j][0] * vertices[i][1];
+    }
+    area.abs() * 0.5
 }
 
 fn split_detection_prediction<'a>(
@@ -1972,25 +2194,42 @@ fn draw_text_8x8(image: &mut RgbaImage, x: u32, y: u32, text: &str, color: Rgba<
     let width = image.width();
     let height = image.height();
     for ch in text.chars() {
-        let c = if ch.is_ascii() { ch } else { '?' };
-        if let Some(glyph) = BASIC_FONTS.get(c) {
-            for (row, row_bits) in glyph.iter().enumerate() {
-                let yy = y.saturating_add(row as u32);
-                if yy >= height {
-                    continue;
-                }
-                for col in 0..8 {
-                    if ((row_bits >> col) & 1) == 0 {
+        if ch.is_ascii() {
+            // Render ASCII characters using 8x8 bitmap font
+            if let Some(glyph) = BASIC_FONTS.get(ch) {
+                for (row, row_bits) in glyph.iter().enumerate() {
+                    let yy = y.saturating_add(row as u32);
+                    if yy >= height {
                         continue;
                     }
-                    let xx = cursor_x.saturating_add(col as u32);
+                    for col in 0..8 {
+                        if ((row_bits >> col) & 1) == 0 {
+                            continue;
+                        }
+                        let xx = cursor_x.saturating_add(col as u32);
+                        if xx < width {
+                            image.put_pixel(xx, yy, color);
+                        }
+                    }
+                }
+            }
+            cursor_x = cursor_x.saturating_add(8);
+        } else {
+            // Non-ASCII characters: draw a filled 8x8 block as placeholder
+            for row in 0..8u32 {
+                let yy = y.saturating_add(row);
+                if yy >= height {
+                    break;
+                }
+                for col in 0..8u32 {
+                    let xx = cursor_x.saturating_add(col);
                     if xx < width {
                         image.put_pixel(xx, yy, color);
                     }
                 }
             }
+            cursor_x = cursor_x.saturating_add(8);
         }
-        cursor_x = cursor_x.saturating_add(8);
         if cursor_x >= width {
             break;
         }
@@ -2501,6 +2740,9 @@ mod tests {
             0.45,
             10,
             Some(2),
+            None,
+            false,
+            0.1,
         )
         .expect("classification decode should succeed");
         assert_eq!(decoded.task, YoloTaskKind::Classify);
@@ -2525,6 +2767,9 @@ mod tests {
             0.45,
             10,
             Some(1),
+            None,
+            false,
+            0.1,
         )
         .expect("classification decode should keep best prediction");
         assert_eq!(decoded.task, YoloTaskKind::Classify);
@@ -2551,6 +2796,9 @@ mod tests {
             0.45,
             10,
             None,
+            None,
+            false,
+            0.1,
         )
         .expect("obb decode should succeed");
         assert_eq!(decoded.task, YoloTaskKind::Obb);
@@ -2558,5 +2806,205 @@ mod tests {
         assert_eq!(decoded.obb[0].label, "plane");
         assert!(decoded.obb[0].xywhr[2] > 0.0);
         assert!(decoded.obb[0].xywhr[3] > 0.0);
+    }
+
+    #[test]
+    fn task_kind_override_bypasses_auto_detection() {
+        // A classification-shaped output, but we force Detect mode
+        let logits = vec![0.1_f32, 4.0, 2.5, 1.0];
+        let output = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![1, 4],
+            values: &logits,
+        };
+        let decoded = decode_yolo_outputs(
+            &[output],
+            &dummy_meta(),
+            &["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
+            0.0,
+            0.45,
+            10,
+            None,
+            Some(YoloTaskKind::Detect),
+            false,
+            0.1,
+        )
+        .expect("detect with task override should succeed");
+        assert_eq!(decoded.task, YoloTaskKind::Detect);
+    }
+
+    #[test]
+    fn nms_class_agnostic_suppresses_across_classes() {
+        // Two boxes with different classes but high IoU
+        let box1 = YoloBox {
+            xyxy: [0.0, 0.0, 10.0, 10.0],
+            xywh: [5.0, 5.0, 10.0, 10.0],
+            conf: 0.9,
+            cls: 0,
+            label: "a".to_string(),
+        };
+        let box2 = YoloBox {
+            xyxy: [1.0, 1.0, 11.0, 11.0],
+            xywh: [6.0, 6.0, 10.0, 10.0],
+            conf: 0.8,
+            cls: 1,
+            label: "b".to_string(),
+        };
+        // Class-aware: both survive
+        let result_aware = non_max_suppression(
+            vec![box1.clone(), box2.clone()],
+            0.5,
+            100,
+            false,
+        );
+        assert_eq!(result_aware.len(), 2);
+        // Class-agnostic: second is suppressed
+        let result_agnostic = non_max_suppression(
+            vec![box1, box2],
+            0.5,
+            100,
+            true,
+        );
+        assert_eq!(result_agnostic.len(), 1);
+    }
+
+    #[test]
+    fn keypoint_confidence_threshold_filters_low_confidence() {
+        let predictions: Vec<f32> = vec![
+            16.0, 16.0, 8.0, 4.0, // cx, cy, w, h
+            0.95, // objectness
+            0.9,  // class score (1 class)
+            // 2 keypoints: x, y, conf
+            10.0, 10.0, 0.8,
+            20.0, 20.0, 0.05,
+        ];
+        let output = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![1, 1, 11],
+            values: &predictions,
+        };
+        let decoded = decode_yolo_outputs(
+            &[output],
+            &dummy_meta(),
+            &["person".to_string()],
+            0.25,
+            0.45,
+            10,
+            None,
+            Some(YoloTaskKind::Pose),
+            false,
+            0.1, // keypoint_confidence_threshold = 0.1
+        )
+        .expect("pose decode should succeed");
+        // The second keypoint (conf=0.05) should be filtered out
+        assert_eq!(decoded.keypoints.len(), 1);
+        assert_eq!(decoded.keypoints[0].len(), 1);
+        assert!(decoded.keypoints[0][0].conf >= 0.1);
+    }
+
+    #[test]
+    fn rotated_iou_identical_boxes() {
+        let corners = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 5.0],
+            [0.0, 5.0],
+        ];
+        let iou = rotated_iou(&corners, &corners);
+        assert!((iou - 1.0).abs() < 1e-4, "identical boxes should have IoU=1.0, got {iou}");
+    }
+
+    #[test]
+    fn rotated_iou_non_overlapping() {
+        let corners_a = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 5.0],
+            [0.0, 5.0],
+        ];
+        let corners_b = [
+            [20.0, 0.0],
+            [30.0, 0.0],
+            [30.0, 5.0],
+            [20.0, 5.0],
+        ];
+        let iou = rotated_iou(&corners_a, &corners_b);
+        assert!(iou < 0.01, "non-overlapping boxes should have IoU≈0.0, got {iou}");
+    }
+
+    #[test]
+    fn rotated_iou_partial_overlap() {
+        let corners_a = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ];
+        let corners_b = [
+            [5.0, 0.0],
+            [15.0, 0.0],
+            [15.0, 10.0],
+            [5.0, 10.0],
+        ];
+        let iou = rotated_iou(&corners_a, &corners_b);
+        // Intersection = 5*10 = 50, union = 100+100-50 = 150, IoU = 50/150 ≈ 0.333
+        assert!((iou - 0.333).abs() < 0.02, "partial overlap should have IoU≈0.333, got {iou}");
+    }
+
+    #[test]
+    fn rotated_iou_rotated_boxes_lower_than_axis_aligned() {
+        // Two boxes at 45° that share the same center but different sizes.
+        // Their axis-aligned bounding boxes overlap heavily, but rotated IoU should
+        // be much lower than axis-aligned IoU.
+        use super::oriented_box_corners;
+        let corners_a = oriented_box_corners([50.0, 50.0], 40.0, 10.0, std::f32::consts::FRAC_PI_4);
+        let corners_b = oriented_box_corners([50.0, 50.0], 40.0, 10.0, 0.0);
+        let rot_iou = rotated_iou(&corners_a, &corners_b);
+
+        // Compute axis-aligned IoU for comparison
+        let xyxy_a = super::corners_to_xyxy(&corners_a);
+        let xyxy_b = super::corners_to_xyxy(&corners_b);
+        let aa_iou = intersection_over_union(&xyxy_a, &xyxy_b);
+
+        assert!(
+            rot_iou < aa_iou,
+            "rotated IoU ({rot_iou}) should be less than axis-aligned IoU ({aa_iou}) for rotated boxes"
+        );
+    }
+
+    #[test]
+    fn obb_nms_uses_rotated_iou() {
+        // Two OBBs with same class, same center, different rotation.
+        // Axis-aligned IoU is high, but rotated IoU is low.
+        // With rotated IoU, NMS should NOT suppress the second box.
+        use super::oriented_box_corners;
+        let corners_a = oriented_box_corners([50.0, 50.0], 40.0, 10.0, 0.0);
+        let corners_b = oriented_box_corners([50.0, 50.0], 40.0, 10.0, std::f32::consts::FRAC_PI_4);
+
+        let obb_a = YoloObb {
+            xywhr: [50.0, 50.0, 40.0, 10.0, 0.0],
+            corners: corners_a,
+            xyxy: super::corners_to_xyxy(&corners_a),
+            conf: 0.9,
+            cls: 0,
+            label: "plane".to_string(),
+        };
+        let obb_b = YoloObb {
+            xywhr: [50.0, 50.0, 40.0, 10.0, std::f32::consts::FRAC_PI_4],
+            corners: corners_b,
+            xyxy: super::corners_to_xyxy(&corners_b),
+            conf: 0.8,
+            cls: 0,
+            label: "plane".to_string(),
+        };
+
+        // With IoU threshold 0.5, both should survive because rotated IoU is low
+        let result = non_max_suppression_obb(
+            vec![obb_a, obb_b],
+            0.5,
+            100,
+            false,
+        );
+        assert_eq!(result.len(), 2, "rotated boxes at different angles should both survive NMS");
     }
 }

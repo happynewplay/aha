@@ -291,6 +291,34 @@ struct RunArgs {
     /// Log realtime stream FPS/latency every N processed frames (YOLO only)
     #[arg(long)]
     stream_log_every: Option<usize>,
+
+    /// Confidence threshold for detection filtering (YOLO only, default: 0.25)
+    #[arg(long)]
+    conf: Option<f32>,
+
+    /// IoU threshold for NMS (YOLO only, default: 0.45)
+    #[arg(long)]
+    iou: Option<f32>,
+
+    /// Maximum number of detections per image (YOLO only, default: 300)
+    #[arg(long)]
+    max_detections: Option<usize>,
+
+    /// Force YOLO task kind instead of auto-detection: detect|segment|pose|classify|obb
+    #[arg(long)]
+    task: Option<crate::models::yolo::config::YoloTaskKind>,
+
+    /// Enable class-agnostic NMS: suppress overlapping boxes across classes (YOLO only)
+    #[arg(long, default_value_t = false)]
+    nms_class_agnostic: bool,
+
+    /// Keypoint confidence threshold for pose estimation (YOLO only, default: 0.1)
+    #[arg(long)]
+    keypoint_conf: Option<f32>,
+
+    /// Keep original images in results for plotting (YOLO only, default: true)
+    #[arg(long)]
+    keep_images: Option<bool>,
 }
 
 /// Arguments for the 'delete' subcommand (delete model from default location)
@@ -515,6 +543,13 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
                 max_frames: args.max_frames,
                 frame_stride: args.frame_stride,
                 stream_log_every: args.stream_log_every,
+                conf_threshold: args.conf,
+                iou_threshold: args.iou,
+                max_detections: args.max_detections,
+                task_kind: args.task,
+                nms_class_agnostic: if args.nms_class_agnostic { Some(true) } else { None },
+                keypoint_confidence_threshold: args.keypoint_conf,
+                keep_images: args.keep_images,
             };
             YoloExec::run_with_spec_and_options(
                 &args.input,

@@ -18,6 +18,7 @@ use crate::{
     models::{
         ArtifactKind, LoadSpec, ModelPaths, WhichModel,
         yolo::{
+            config::YoloConfig,
             generate::YoloGenerateModel,
             model::{YoloPredictOptions, YoloResults},
         },
@@ -35,6 +36,43 @@ pub struct YoloExecOptions {
     pub max_frames: Option<usize>,
     pub frame_stride: Option<usize>,
     pub stream_log_every: Option<usize>,
+    /// Inference config overrides. Fields set to `None` use YoloConfig defaults.
+    pub conf_threshold: Option<f32>,
+    pub iou_threshold: Option<f32>,
+    pub max_detections: Option<usize>,
+    pub task_kind: Option<crate::models::yolo::config::YoloTaskKind>,
+    pub nms_class_agnostic: Option<bool>,
+    pub keypoint_confidence_threshold: Option<f32>,
+    pub keep_images: Option<bool>,
+}
+
+impl YoloExecOptions {
+    /// Build a `YoloConfig` by applying non-None option overrides on top of defaults.
+    pub fn to_yolo_config(&self) -> YoloConfig {
+        let mut config = YoloConfig::default();
+        if let Some(v) = self.conf_threshold {
+            config.confidence_threshold = v;
+        }
+        if let Some(v) = self.iou_threshold {
+            config.iou_threshold = v;
+        }
+        if let Some(v) = self.max_detections {
+            config.max_detections = v;
+        }
+        if let Some(v) = self.task_kind {
+            config.task_kind = Some(v);
+        }
+        if let Some(v) = self.nms_class_agnostic {
+            config.nms_class_agnostic = v;
+        }
+        if let Some(v) = self.keypoint_confidence_threshold {
+            config.keypoint_confidence_threshold = v;
+        }
+        if let Some(v) = self.keep_images {
+            config.keep_images = v;
+        }
+        config
+    }
 }
 
 impl YoloExec {
@@ -52,7 +90,8 @@ impl YoloExec {
             .first()
             .ok_or_else(|| anyhow!("yolo run requires one source input"))?;
         let load_start = Instant::now();
-        let mut model = YoloGenerateModel::init_from_spec(spec)?;
+        let config = options.to_yolo_config();
+        let mut model = YoloGenerateModel::init_with_config(spec, config)?;
         println!("Time elapsed in load model is: {:?}", load_start.elapsed());
 
         if options.stream {
