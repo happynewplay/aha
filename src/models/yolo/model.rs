@@ -30,6 +30,48 @@ use super::config::YoloConfig;
 const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "avi", "mov", "mkv", "webm"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum YoloTaskKind {
+    #[default]
+    Detect,
+    Segment,
+    Pose,
+    Classify,
+    Obb,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct YoloKeypoint {
+    pub x: f32,
+    pub y: f32,
+    pub conf: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct YoloMask {
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct YoloClassification {
+    pub cls: usize,
+    pub label: String,
+    pub conf: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct YoloObb {
+    pub xywhr: [f32; 5],
+    pub corners: [[f32; 2]; 4],
+    pub xyxy: [f32; 4],
+    pub conf: f32,
+    pub cls: usize,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoloBox {
     pub xyxy: [f32; 4],
@@ -48,7 +90,16 @@ pub struct YoloSpeed {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct YoloResults {
+    pub task: YoloTaskKind,
     pub boxes: Vec<YoloBox>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub masks: Vec<YoloMask>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub keypoints: Vec<Vec<YoloKeypoint>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub probs: Vec<YoloClassification>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub obb: Vec<YoloObb>,
     pub path: String,
     pub names: Vec<String>,
     pub speed: YoloSpeed,
@@ -65,8 +116,27 @@ impl YoloResults {
             .as_ref()
             .ok_or_else(|| anyhow!("plot is not available for this result source"))?
             .to_rgba8();
+        for (index, mask) in self.masks.iter().enumerate() {
+            overlay_mask(&mut canvas, mask, palette_color(index), 96);
+            draw_mask_contour(&mut canvas, mask, palette_color(index));
+        }
         for detection in &self.boxes {
             draw_box(&mut canvas, detection, Rgba([255, 64, 64, 255]));
+        }
+        for obb in &self.obb {
+            draw_oriented_box(&mut canvas, obb, Rgba([64, 200, 255, 255]));
+        }
+        for points in &self.keypoints {
+            draw_keypoints(&mut canvas, points, Rgba([80, 255, 96, 255]));
+        }
+        if let Some(best) = self.probs.first() {
+            draw_label(
+                &mut canvas,
+                &format!("{} {:.2}", best.label, best.conf),
+                4,
+                20,
+                Rgba([96, 96, 255, 255]),
+            );
         }
         Ok(canvas)
     }
@@ -75,24 +145,145 @@ impl YoloResults {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
+    pub fn to_coco_annotations(
+        &self,
+        image_id: u64,
+        next_annotation_id: &mut u64,
+    ) -> Vec<serde_json::Value> {
+        let mut annotations = Vec::new();
+        for (index, detection) in self.boxes.iter().enumerate() {
+            let mut annotation = json!({
+                "id": *next_annotation_id,
+                "image_id": image_id,
+                "category_id": detection.cls + 1,
+                "bbox": [
+                    detection.xyxy[0],
+                    detection.xyxy[1],
+                    detection.xywh[2],
+                    detection.xywh[3],
+                ],
+                "score": detection.conf,
+                "area": detection.xywh[2] * detection.xywh[3],
+                "iscrowd": 0,
+            });
+            if let Some(points) = self.keypoints.get(index)
+                && !points.is_empty()
+            {
+                let flat = points
+                    .iter()
+                    .flat_map(|point| [point.x, point.y, if point.conf > 0.0 { 2.0 } else { 0.0 }])
+                    .collect::<Vec<_>>();
+                annotation["keypoints"] = json!(flat);
+                annotation["num_keypoints"] = json!(points.iter().filter(|point| point.conf > 0.0).count());
+            }
+            if let Some(mask) = self.masks.get(index) {
+                let contour = sample_mask_contour_points(mask, 2, 256)
+                    .into_iter()
+                    .flat_map(|[x, y]| [x as f32, y as f32])
+                    .collect::<Vec<_>>();
+                if contour.len() >= 6 {
+                    annotation["segmentation"] = json!([contour]);
+                }
+            }
+            annotations.push(annotation);
+            *next_annotation_id += 1;
+        }
+        for obb in &self.obb {
+            annotations.push(json!({
+                "id": *next_annotation_id,
+                "image_id": image_id,
+                "category_id": obb.cls + 1,
+                "bbox": [
+                    obb.xyxy[0],
+                    obb.xyxy[1],
+                    (obb.xyxy[2] - obb.xyxy[0]).max(0.0),
+                    (obb.xyxy[3] - obb.xyxy[1]).max(0.0),
+                ],
+                "score": obb.conf,
+                "area": (obb.xyxy[2] - obb.xyxy[0]).max(0.0) * (obb.xyxy[3] - obb.xyxy[1]).max(0.0),
+                "iscrowd": 0,
+                "segmentation": [obb.corners.iter().flat_map(|point| [point[0], point[1]]).collect::<Vec<_>>()],
+            }));
+            *next_annotation_id += 1;
+        }
+        annotations
+    }
+
     pub fn latency_ms(&self) -> f32 {
         self.speed.preprocess_ms + self.speed.inference_ms + self.speed.postprocess_ms
     }
 
     pub fn save_txt(&self, path: &str) -> Result<()> {
+        if !self.probs.is_empty() {
+            let content = self
+                .probs
+                .iter()
+                .map(|prediction| {
+                    format!(
+                        "{} {:.6} {}",
+                        prediction.cls, prediction.conf, prediction.label
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(path, content)?;
+            return Ok(());
+        }
+        if !self.obb.is_empty() {
+            let content = self
+                .obb
+                .iter()
+                .map(|obb| {
+                    format!(
+                        "{} {:.6} {:.6} {:.6} {:.6} {:.6} {:.6}",
+                        obb.cls,
+                        obb.xywhr[0],
+                        obb.xywhr[1],
+                        obb.xywhr[2],
+                        obb.xywhr[3],
+                        obb.xywhr[4],
+                        obb.conf,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(path, content)?;
+            return Ok(());
+        }
         let content = self
             .boxes
             .iter()
-            .map(|detection| {
-                format!(
-                    "{} {:.6} {:.6} {:.6} {:.6} {:.6}",
-                    detection.cls,
-                    detection.xywh[0],
-                    detection.xywh[1],
-                    detection.xywh[2],
-                    detection.xywh[3],
-                    detection.conf,
-                )
+            .enumerate()
+            .map(|(index, detection)| {
+                let mut fields = vec![
+                    detection.cls.to_string(),
+                    format!("{:.6}", detection.xywh[0]),
+                    format!("{:.6}", detection.xywh[1]),
+                    format!("{:.6}", detection.xywh[2]),
+                    format!("{:.6}", detection.xywh[3]),
+                    format!("{:.6}", detection.conf),
+                ];
+                if let Some(points) = self.keypoints.get(index)
+                    && !points.is_empty()
+                {
+                    fields.push("kpts".to_string());
+                    for point in points {
+                        fields.push(format!("{:.6}", point.x));
+                        fields.push(format!("{:.6}", point.y));
+                        fields.push(format!("{:.6}", point.conf));
+                    }
+                }
+                if let Some(mask) = self.masks.get(index) {
+                    let contour = sample_mask_contour_points(mask, 4, 128);
+                    if !contour.is_empty() {
+                        fields.push("mask".to_string());
+                        for [x, y] in contour {
+                            fields.push(x.to_string());
+                            fields.push(y.to_string());
+                        }
+                    }
+                }
+                fields.join(" ")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -106,6 +297,7 @@ pub struct YoloPredictOptions {
     pub stream: bool,
     pub workers: usize,
     pub batch_size: usize,
+    pub top_k: Option<usize>,
     pub max_frames: Option<usize>,
     pub frame_stride: usize,
     pub stop_flag: Option<Arc<AtomicBool>>,
@@ -117,11 +309,224 @@ impl Default for YoloPredictOptions {
             stream: false,
             workers: 1,
             batch_size: 16,
+            top_k: None,
             max_frames: None,
             frame_stride: 1,
             stop_flag: None,
         }
     }
+}
+
+fn palette_color(index: usize) -> Rgba<u8> {
+    const COLORS: [[u8; 4]; 6] = [
+        [255, 99, 132, 255],
+        [54, 162, 235, 255],
+        [255, 206, 86, 255],
+        [75, 192, 192, 255],
+        [153, 102, 255, 255],
+        [255, 159, 64, 255],
+    ];
+    Rgba(COLORS[index % COLORS.len()])
+}
+
+fn overlay_mask(image: &mut RgbaImage, mask: &YoloMask, color: Rgba<u8>, alpha: u8) {
+    if mask.width != image.width() || mask.height != image.height() {
+        return;
+    }
+    let alpha_factor = alpha as f32 / 255.0;
+    for (index, pixel) in image.pixels_mut().enumerate() {
+        let Some(&mask_value) = mask.data.get(index) else {
+            break;
+        };
+        if mask_value == 0 {
+            continue;
+        }
+        let weight = (mask_value as f32 / 255.0) * alpha_factor;
+        for channel in 0..3 {
+            pixel.0[channel] = ((pixel.0[channel] as f32 * (1.0 - weight))
+                + (color.0[channel] as f32 * weight))
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+fn draw_mask_contour(image: &mut RgbaImage, mask: &YoloMask, color: Rgba<u8>) {
+    for [x, y] in sample_mask_contour_points(mask, 1, usize::MAX) {
+        if x < image.width() && y < image.height() {
+            image.put_pixel(x, y, color);
+        }
+    }
+}
+
+fn draw_line(image: &mut RgbaImage, start: [f32; 2], end: [f32; 2], color: Rgba<u8>) {
+    let mut x0 = start[0].round() as i32;
+    let mut y0 = start[1].round() as i32;
+    let x1 = end[0].round() as i32;
+    let y1 = end[1].round() as i32;
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < image.width() && (y0 as u32) < image.height() {
+            image.put_pixel(x0 as u32, y0 as u32, color);
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = err * 2;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn draw_oriented_box(image: &mut RgbaImage, obb: &YoloObb, color: Rgba<u8>) {
+    for index in 0..4 {
+        draw_line(image, obb.corners[index], obb.corners[(index + 1) % 4], color);
+    }
+    let anchor_x = obb.corners[0][0].max(0.0) as u32;
+    let anchor_y = obb.corners[0][1].max(0.0) as u32;
+    draw_label(image, &format!("{} {:.2}", obb.label, obb.conf), anchor_x, anchor_y, color);
+}
+
+fn draw_keypoints(image: &mut RgbaImage, keypoints: &[YoloKeypoint], color: Rgba<u8>) {
+    for &(left, right) in coco_pose_skeleton(keypoints.len()) {
+        let Some(start) = keypoints.get(left) else {
+            continue;
+        };
+        let Some(end) = keypoints.get(right) else {
+            continue;
+        };
+        if start.conf > 0.0 && end.conf > 0.0 {
+            draw_line(image, [start.x, start.y], [end.x, end.y], color);
+        }
+    }
+    for point in keypoints {
+        if point.conf <= 0.0 {
+            continue;
+        }
+        let cx = point.x.round() as i32;
+        let cy = point.y.round() as i32;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let x = cx + dx;
+                let y = cy + dy;
+                if x >= 0 && y >= 0 && (x as u32) < image.width() && (y as u32) < image.height() {
+                    image.put_pixel(x as u32, y as u32, color);
+                }
+            }
+        }
+    }
+}
+
+fn coco_pose_skeleton(keypoint_count: usize) -> &'static [(usize, usize)] {
+    const COCO17: &[(usize, usize)] = &[
+        (15, 13),
+        (13, 11),
+        (16, 14),
+        (14, 12),
+        (11, 12),
+        (5, 11),
+        (6, 12),
+        (5, 6),
+        (5, 7),
+        (6, 8),
+        (7, 9),
+        (8, 10),
+        (1, 2),
+        (0, 1),
+        (0, 2),
+        (1, 3),
+        (2, 4),
+        (3, 5),
+        (4, 6),
+    ];
+    if keypoint_count >= 17 { COCO17 } else { &[] }
+}
+
+fn is_mask_boundary(mask: &YoloMask, x: u32, y: u32) -> bool {
+    if x >= mask.width || y >= mask.height {
+        return false;
+    }
+    let index = (y * mask.width + x) as usize;
+    if mask.data.get(index).copied().unwrap_or(0) == 0 {
+        return false;
+    }
+    for (dx, dy) in [(-1_i32, 0_i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= mask.width as i32 || ny >= mask.height as i32 {
+            return true;
+        }
+        let neighbor_index = (ny as u32 * mask.width + nx as u32) as usize;
+        if mask.data.get(neighbor_index).copied().unwrap_or(0) == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn sample_mask_contour_points(mask: &YoloMask, stride: usize, max_points: usize) -> Vec<[u32; 2]> {
+    if mask.width == 0 || mask.height == 0 {
+        return Vec::new();
+    }
+    let stride = stride.max(1);
+    let mut points = Vec::new();
+    let mut boundary_index = 0_usize;
+    for y in 0..mask.height {
+        for x in 0..mask.width {
+            if !is_mask_boundary(mask, x, y) {
+                continue;
+            }
+            if boundary_index.is_multiple_of(stride) {
+                points.push([x, y]);
+                if points.len() >= max_points {
+                    return points;
+                }
+            }
+            boundary_index += 1;
+        }
+    }
+    points
+}
+
+fn collect_coco_categories(results: &[YoloResults]) -> Vec<serde_json::Value> {
+    let mut categories = Vec::<(usize, String)>::new();
+    for result in results {
+        for (index, name) in result.names.iter().enumerate() {
+            if !categories.iter().any(|(cls, _)| *cls == index) {
+                categories.push((index, name.clone()));
+            }
+        }
+        for detection in &result.boxes {
+            if !categories.iter().any(|(cls, _)| *cls == detection.cls) {
+                categories.push((detection.cls, detection.label.clone()));
+            }
+        }
+        for obb in &result.obb {
+            if !categories.iter().any(|(cls, _)| *cls == obb.cls) {
+                categories.push((obb.cls, obb.label.clone()));
+            }
+        }
+        for prediction in &result.probs {
+            if !categories.iter().any(|(cls, _)| *cls == prediction.cls) {
+                categories.push((prediction.cls, prediction.label.clone()));
+            }
+        }
+    }
+    categories.sort_by_key(|(cls, _)| *cls);
+    categories
+        .into_iter()
+        .map(|(cls, name)| json!({ "id": cls + 1, "name": name }))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +542,37 @@ struct LetterboxMeta {
     pad_y: f32,
     orig_w: u32,
     orig_h: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PredictionLayout {
+    pred_count: usize,
+    attr_count: usize,
+    transposed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PredictionAuxLayout {
+    has_objectness: bool,
+    class_count: usize,
+    extra_start: usize,
+}
+
+#[derive(Debug, Default)]
+struct DecodedYoloOutput {
+    task: YoloTaskKind,
+    boxes: Vec<YoloBox>,
+    masks: Vec<YoloMask>,
+    keypoints: Vec<Vec<YoloKeypoint>>,
+    probs: Vec<YoloClassification>,
+    obb: Vec<YoloObb>,
+}
+
+#[derive(Debug, Clone)]
+struct OnnxOutputTensor<'a> {
+    name: String,
+    shape: Vec<i64>,
+    values: &'a [f32],
 }
 
 #[derive(Debug)]
@@ -190,17 +626,17 @@ impl YoloModel {
         if options.stream {
             let mut results = Vec::with_capacity(sources.len());
             for item in sources {
-                results.push(self.backend.predict(&item, &self.config)?);
+                results.push(self.backend.predict(&item, &self.config, options.top_k)?);
             }
             return Ok(results);
         }
 
         let workers = options.workers.max(1);
         if workers == 1 || sources.len() <= 1 {
-            return self.predict_sequential(sources, options.batch_size.max(1));
+            return self.predict_sequential(sources, options.batch_size.max(1), options.top_k);
         }
 
-        self.predict_parallel(sources, workers, options.batch_size.max(1))
+        self.predict_parallel(sources, workers, options.batch_size.max(1), options.top_k)
     }
 
     pub fn predict_stream_with_options<F>(
@@ -236,7 +672,12 @@ impl YoloModel {
             .iter()
             .map(|result| {
                 json!({
+                    "task": result.task,
                     "boxes": result.boxes,
+                    "masks": result.masks,
+                    "keypoints": result.keypoints,
+                    "probs": result.probs,
+                    "obb": result.obb,
                     "path": result.path,
                     "names": result.names,
                     "speed": result.speed,
@@ -248,15 +689,42 @@ impl YoloModel {
         Ok(serde_json::to_string_pretty(&payload)?)
     }
 
+    pub fn results_to_coco_json(results: &[YoloResults]) -> Result<String> {
+        let images = results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| {
+                json!({
+                    "id": index + 1,
+                    "file_name": result.path,
+                    "width": result.width,
+                    "height": result.height,
+                })
+            })
+            .collect::<Vec<_>>();
+        let categories = collect_coco_categories(results);
+        let mut next_annotation_id = 1_u64;
+        let mut annotations = Vec::new();
+        for (index, result) in results.iter().enumerate() {
+            annotations.extend(result.to_coco_annotations((index + 1) as u64, &mut next_annotation_id));
+        }
+        Ok(serde_json::to_string_pretty(&json!({
+            "images": images,
+            "annotations": annotations,
+            "categories": categories,
+        }))?)
+    }
+
     fn predict_sequential(
         &mut self,
         sources: Vec<ResolvedImageSource>,
         batch_size: usize,
+        top_k: Option<usize>,
     ) -> Result<Vec<YoloResults>> {
         let mut results = Vec::with_capacity(sources.len());
         for chunk in sources.chunks(batch_size) {
             for item in chunk {
-                results.push(self.backend.predict(item, &self.config)?);
+                results.push(self.backend.predict(item, &self.config, top_k)?);
             }
         }
         Ok(results)
@@ -267,6 +735,7 @@ impl YoloModel {
         sources: Vec<ResolvedImageSource>,
         workers: usize,
         batch_size: usize,
+        top_k: Option<usize>,
     ) -> Result<Vec<YoloResults>> {
         let indexed_sources = sources.into_iter().enumerate().collect::<Vec<_>>();
         let chunk_size = batch_size.max(indexed_sources.len().div_ceil(workers).max(1));
@@ -281,11 +750,12 @@ impl YoloModel {
             for group in grouped {
                 let onnx_path = self.onnx_path.clone();
                 let config = self.config.clone();
+                let top_k = top_k;
                 handles.push(scope.spawn(move || -> Result<Vec<(usize, YoloResults)>> {
                     let mut backend = YoloOnnxBackend::load(&onnx_path, &config)?;
                     let mut partial = Vec::with_capacity(group.len());
                     for (idx, item) in group {
-                        partial.push((idx, backend.predict(&item, &config)?));
+                        partial.push((idx, backend.predict(&item, &config, top_k)?));
                     }
                     Ok(partial)
                 }));
@@ -312,7 +782,7 @@ struct YoloOnnxBackend {
     #[cfg(not(feature = "onnx-runtime"))]
     _session: (),
     input_name: String,
-    output_name: String,
+    output_names: Vec<String>,
     input_height: usize,
     input_width: usize,
     class_names: Vec<String>,
@@ -336,11 +806,9 @@ impl YoloOnnxBackend {
                 }
                 _ => (config.image_size, config.image_size),
             };
-            let output_name = bundle
-                .output_names
-                .first()
-                .cloned()
-                .ok_or_else(|| anyhow!("yolo onnx output name is missing"))?;
+            if bundle.output_names.is_empty() {
+                return Err(anyhow!("yolo onnx output names are missing"));
+            }
             let input_name = bundle
                 .input_names
                 .first()
@@ -349,7 +817,7 @@ impl YoloOnnxBackend {
             Ok(Self {
                 session: bundle.session,
                 input_name,
-                output_name,
+                output_names: bundle.output_names,
                 input_height,
                 input_width,
                 class_names: config.class_names.clone(),
@@ -364,7 +832,12 @@ impl YoloOnnxBackend {
         }
     }
 
-    fn predict(&mut self, item: &ResolvedImageSource, config: &YoloConfig) -> Result<YoloResults> {
+    fn predict(
+        &mut self,
+        item: &ResolvedImageSource,
+        config: &YoloConfig,
+        top_k: Option<usize>,
+    ) -> Result<YoloResults> {
         let preprocess_start = Instant::now();
         let (input_tensor, meta) =
             preprocess_image(&item.image, self.input_width, self.input_height)?;
@@ -387,23 +860,36 @@ impl YoloOnnxBackend {
                 .into_dyn(),
             )])?;
             let inference_ms = inference_start.elapsed().as_secs_f32() * 1000.0;
-            let output_value = outputs
-                .get(&self.output_name)
-                .ok_or_else(|| anyhow!("yolo onnx output tensor is missing"))?;
             let postprocess_start = Instant::now();
-            let (shape, values) = output_value.try_extract_tensor::<f32>()?;
-            let boxes = decode_yolo_output(
-                &shape,
-                values,
+            let mut output_tensors = Vec::with_capacity(self.output_names.len());
+            for name in &self.output_names {
+                let output_value = outputs
+                    .get(name)
+                    .ok_or_else(|| anyhow!("yolo onnx output tensor is missing: {name}"))?;
+                let (shape, values) = output_value.try_extract_tensor::<f32>()?;
+                output_tensors.push(OnnxOutputTensor {
+                    name: name.clone(),
+                    shape: shape.to_vec(),
+                    values,
+                });
+            }
+            let decoded = decode_yolo_outputs(
+                &output_tensors,
                 &meta,
                 &self.class_names,
                 config.confidence_threshold,
                 config.iou_threshold,
                 config.max_detections,
+                top_k,
             )?;
             let postprocess_ms = postprocess_start.elapsed().as_secs_f32() * 1000.0;
             Ok(YoloResults {
-                boxes,
+                task: decoded.task,
+                boxes: decoded.boxes,
+                masks: decoded.masks,
+                keypoints: decoded.keypoints,
+                probs: decoded.probs,
+                obb: decoded.obb,
                 path: item.source.clone(),
                 names: self.class_names.clone(),
                 speed: YoloSpeed {
@@ -418,7 +904,7 @@ impl YoloOnnxBackend {
         }
         #[cfg(not(feature = "onnx-runtime"))]
         {
-            let _ = (item, config, preprocess_ms, input_tensor, meta);
+            let _ = (item, config, top_k, preprocess_ms, input_tensor, meta);
             Err(anyhow!(
                 "onnx runtime support is not enabled; rebuild with --features onnx-runtime"
             ))
@@ -472,35 +958,91 @@ fn preprocess_image(
     ))
 }
 
-fn decode_yolo_output(
-    shape: &[i64],
-    values: &[f32],
+fn decode_yolo_outputs(
+    outputs: &[OnnxOutputTensor<'_>],
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    iou_threshold: f32,
+    max_detections: usize,
+    top_k: Option<usize>,
+) -> Result<DecodedYoloOutput> {
+    let primary = select_primary_output(outputs)
+        .ok_or_else(|| anyhow!("yolo onnx output tensor list is empty"))?;
+
+    if is_classification_output(primary) {
+        return decode_yolo_classify_output(
+            primary,
+            class_names,
+            conf_threshold,
+            top_k,
+            max_detections,
+        );
+    }
+
+    if let Some(proto) = find_mask_proto_output(outputs) {
+        if let Some(decoded) = try_decode_yolo_segment_output(
+            primary,
+            proto,
+            meta,
+            class_names,
+            conf_threshold,
+            iou_threshold,
+            max_detections,
+        )? {
+            return Ok(decoded);
+        }
+    }
+
+    if let Some(decoded) = try_decode_yolo_pose_output(
+        primary,
+        meta,
+        class_names,
+        conf_threshold,
+        iou_threshold,
+        max_detections,
+    )? {
+        return Ok(decoded);
+    }
+
+    if let Some(decoded) = try_decode_yolo_obb_output(
+        primary,
+        meta,
+        class_names,
+        conf_threshold,
+        iou_threshold,
+        max_detections,
+    )? {
+        return Ok(decoded);
+    }
+
+    let boxes = decode_yolo_detect_output(
+        primary,
+        meta,
+        class_names,
+        conf_threshold,
+        iou_threshold,
+        max_detections,
+    )?;
+    Ok(DecodedYoloOutput {
+        task: YoloTaskKind::Detect,
+        boxes,
+        ..Default::default()
+    })
+}
+
+fn decode_yolo_detect_output(
+    tensor: &OnnxOutputTensor<'_>,
     meta: &LetterboxMeta,
     class_names: &[String],
     conf_threshold: f32,
     iou_threshold: f32,
     max_detections: usize,
 ) -> Result<Vec<YoloBox>> {
-    if shape.len() != 3 || shape[0] != 1 {
-        return Err(anyhow!("unsupported yolo output shape: {:?}", shape));
-    }
-    let dim1 = shape[1].max(1) as usize;
-    let dim2 = shape[2].max(1) as usize;
-    let (pred_count, attr_count, transposed) = if dim1 > dim2 && dim2 >= 6 {
-        (dim2, dim1, true)
-    } else {
-        (dim1, dim2, false)
-    };
+    let layout = prediction_layout(&tensor.shape, 6)?;
     let mut candidates = Vec::new();
-    for pred_index in 0..pred_count {
-        let prediction = if transposed {
-            (0..attr_count)
-                .map(|attr_index| values[attr_index * pred_count + pred_index])
-                .collect::<Vec<_>>()
-        } else {
-            let start = pred_index * attr_count;
-            values[start..start + attr_count].to_vec()
-        };
+    for pred_index in 0..layout.pred_count {
+        let prediction = prediction_at(tensor.values, &layout, pred_index);
         if let Some(detection) =
             decode_single_prediction(&prediction, meta, class_names, conf_threshold)
         {
@@ -513,6 +1055,607 @@ fn decode_yolo_output(
         iou_threshold,
         max_detections,
     ))
+}
+
+fn decode_yolo_classify_output(
+    tensor: &OnnxOutputTensor<'_>,
+    class_names: &[String],
+    conf_threshold: f32,
+    top_k: Option<usize>,
+    max_detections: usize,
+) -> Result<DecodedYoloOutput> {
+    if tensor.values.is_empty() {
+        return Err(anyhow!("classification output tensor is empty"));
+    }
+    let top_k = top_k.unwrap_or(max_detections).max(1);
+    let probs = classification_probabilities(tensor.values);
+    let mut predictions = probs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(cls, conf)| YoloClassification {
+            cls,
+            label: class_names
+                .get(cls)
+                .cloned()
+                .unwrap_or_else(|| cls.to_string()),
+            conf,
+        })
+        .filter(|prediction| prediction.conf >= conf_threshold)
+        .collect::<Vec<_>>();
+    if predictions.is_empty() {
+        if let Some((cls, conf)) = probs
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+        {
+            predictions.push(YoloClassification {
+                cls,
+                label: class_names
+                    .get(cls)
+                    .cloned()
+                    .unwrap_or_else(|| cls.to_string()),
+                conf,
+            });
+        }
+    }
+    predictions.sort_by(|left, right| right.conf.total_cmp(&left.conf));
+    predictions.truncate(top_k);
+    Ok(DecodedYoloOutput {
+        task: YoloTaskKind::Classify,
+        probs: predictions,
+        ..Default::default()
+    })
+}
+
+fn try_decode_yolo_segment_output(
+    tensor: &OnnxOutputTensor<'_>,
+    proto: &OnnxOutputTensor<'_>,
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    iou_threshold: f32,
+    max_detections: usize,
+) -> Result<Option<DecodedYoloOutput>> {
+    let Some(mask_dim) = infer_proto_channels(&proto.shape) else {
+        return Ok(None);
+    };
+    let layout = prediction_layout(&tensor.shape, 6)?;
+    let Some(aux_layout) = infer_fixed_extra_layout(layout.attr_count, class_names.len(), mask_dim) else {
+        return Ok(None);
+    };
+
+    let mut candidates = Vec::new();
+    for pred_index in 0..layout.pred_count {
+        let prediction = prediction_at(tensor.values, &layout, pred_index);
+        if let Some((detection, coeffs)) = decode_segment_prediction(
+            &prediction,
+            meta,
+            class_names,
+            conf_threshold,
+            aux_layout,
+        ) {
+            candidates.push((detection, coeffs));
+        }
+    }
+
+    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections);
+    if selected.is_empty() {
+        return Ok(Some(DecodedYoloOutput {
+            task: YoloTaskKind::Segment,
+            ..Default::default()
+        }));
+    }
+
+    let mut boxes = Vec::with_capacity(selected.len());
+    let mut masks = Vec::with_capacity(selected.len());
+    for (detection, coeffs) in selected {
+        let mask = decode_mask_from_proto(proto, &coeffs, meta, &detection.xyxy)
+            .unwrap_or_else(|_| decode_rect_mask(meta, &detection.xyxy));
+        boxes.push(detection);
+        masks.push(mask);
+    }
+    Ok(Some(DecodedYoloOutput {
+        task: YoloTaskKind::Segment,
+        boxes,
+        masks,
+        ..Default::default()
+    }))
+}
+
+fn try_decode_yolo_obb_output(
+    tensor: &OnnxOutputTensor<'_>,
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    iou_threshold: f32,
+    max_detections: usize,
+) -> Result<Option<DecodedYoloOutput>> {
+    if !is_probable_obb_output(tensor) {
+        return Ok(None);
+    }
+    let layout = prediction_layout(&tensor.shape, 6)?;
+    let Some(aux_layout) = infer_obb_aux_layout(layout.attr_count, class_names.len()) else {
+        return Ok(None);
+    };
+
+    let mut candidates = Vec::new();
+    for pred_index in 0..layout.pred_count {
+        let prediction = prediction_at(tensor.values, &layout, pred_index);
+        if let Some(obb) = decode_obb_prediction(
+            &prediction,
+            meta,
+            class_names,
+            conf_threshold,
+            aux_layout,
+        ) {
+            candidates.push(obb);
+        }
+    }
+
+    let obb = non_max_suppression_obb(candidates, iou_threshold, max_detections);
+    Ok(Some(DecodedYoloOutput {
+        task: YoloTaskKind::Obb,
+        obb,
+        ..Default::default()
+    }))
+}
+
+fn try_decode_yolo_pose_output(
+    tensor: &OnnxOutputTensor<'_>,
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    iou_threshold: f32,
+    max_detections: usize,
+) -> Result<Option<DecodedYoloOutput>> {
+    let layout = prediction_layout(&tensor.shape, 6)?;
+    let Some(aux_layout) = infer_pose_aux_layout(layout.attr_count, class_names.len()) else {
+        return Ok(None);
+    };
+
+    let mut candidates = Vec::new();
+    for pred_index in 0..layout.pred_count {
+        let prediction = prediction_at(tensor.values, &layout, pred_index);
+        if let Some((detection, keypoints)) = decode_pose_prediction(
+            &prediction,
+            meta,
+            class_names,
+            conf_threshold,
+            aux_layout,
+        ) {
+            candidates.push((detection, keypoints));
+        }
+    }
+
+    let selected = non_max_suppression_with_aux(candidates, iou_threshold, max_detections);
+    let mut boxes = Vec::with_capacity(selected.len());
+    let mut keypoints = Vec::with_capacity(selected.len());
+    for (detection, points) in selected {
+        boxes.push(detection);
+        keypoints.push(points);
+    }
+    Ok(Some(DecodedYoloOutput {
+        task: YoloTaskKind::Pose,
+        boxes,
+        keypoints,
+        ..Default::default()
+    }))
+}
+
+fn select_primary_output<'a>(outputs: &'a [OnnxOutputTensor<'a>]) -> Option<&'a OnnxOutputTensor<'a>> {
+    outputs
+        .iter()
+        .find(|tensor| tensor.shape.len() != 4)
+        .or_else(|| outputs.first())
+}
+
+fn find_mask_proto_output<'a>(outputs: &'a [OnnxOutputTensor<'a>]) -> Option<&'a OnnxOutputTensor<'a>> {
+    outputs.iter().find(|tensor| tensor.shape.len() == 4)
+}
+
+fn is_classification_output(tensor: &OnnxOutputTensor<'_>) -> bool {
+    match tensor.shape.as_slice() {
+        [classes] => *classes > 1,
+        [1, classes] => *classes > 1,
+        [1, 1, classes] => *classes > 1,
+        [1, classes, 1] => *classes > 1,
+        _ => false,
+    }
+}
+
+fn is_probable_obb_output(tensor: &OnnxOutputTensor<'_>) -> bool {
+    let name = tensor.name.to_ascii_lowercase();
+    name.contains("obb")
+        || name.contains("angle")
+        || name.contains("rot")
+        || name.contains("xywhr")
+}
+
+fn prediction_layout(shape: &[i64], min_attr_count: usize) -> Result<PredictionLayout> {
+    if shape.len() != 3 || shape[0] != 1 {
+        return Err(anyhow!("unsupported yolo output shape: {:?}", shape));
+    }
+    let dim1 = shape[1].max(1) as usize;
+    let dim2 = shape[2].max(1) as usize;
+    let (pred_count, attr_count, transposed) = if dim1 > dim2 && dim2 >= min_attr_count {
+        (dim2, dim1, true)
+    } else {
+        (dim1, dim2, false)
+    };
+    if attr_count < min_attr_count {
+        return Err(anyhow!("unsupported yolo attribute count {attr_count} for shape {:?}", shape));
+    }
+    Ok(PredictionLayout {
+        pred_count,
+        attr_count,
+        transposed,
+    })
+}
+
+fn prediction_at(values: &[f32], layout: &PredictionLayout, pred_index: usize) -> Vec<f32> {
+    if layout.transposed {
+        (0..layout.attr_count)
+            .map(|attr_index| values[attr_index * layout.pred_count + pred_index])
+            .collect()
+    } else {
+        let start = pred_index * layout.attr_count;
+        values[start..start + layout.attr_count].to_vec()
+    }
+}
+
+fn classification_probabilities(values: &[f32]) -> Vec<f32> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let all_probabilities = values.iter().all(|value| (0.0..=1.0).contains(value));
+    let sum = values.iter().sum::<f32>();
+    if all_probabilities && (0.99..=1.01).contains(&sum) {
+        return values.to_vec();
+    }
+    softmax(values)
+}
+
+fn softmax(values: &[f32]) -> Vec<f32> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let max = values
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let exps = values
+        .iter()
+        .map(|value| (*value - max).exp())
+        .collect::<Vec<_>>();
+    let sum = exps.iter().sum::<f32>().max(f32::EPSILON);
+    exps.into_iter().map(|value| value / sum).collect()
+}
+
+fn infer_fixed_extra_layout(
+    attr_count: usize,
+    preferred_class_count: usize,
+    extra_dims: usize,
+) -> Option<PredictionAuxLayout> {
+    for has_objectness in [true, false] {
+        let base = if has_objectness { 5 } else { 4 };
+        if attr_count <= base + extra_dims {
+            continue;
+        }
+        let class_count = if preferred_class_count > 0 {
+            preferred_class_count
+        } else {
+            attr_count.checked_sub(base + extra_dims)?
+        };
+        if attr_count == base + class_count + extra_dims && class_count > 0 {
+            return Some(PredictionAuxLayout {
+                has_objectness,
+                class_count,
+                extra_start: base + class_count,
+            });
+        }
+    }
+    None
+}
+
+fn infer_obb_aux_layout(
+    attr_count: usize,
+    preferred_class_count: usize,
+) -> Option<PredictionAuxLayout> {
+    infer_fixed_extra_layout(attr_count, preferred_class_count, 1)
+}
+
+fn infer_pose_aux_layout(attr_count: usize, preferred_class_count: usize) -> Option<PredictionAuxLayout> {
+    for has_objectness in [true, false] {
+        let base = if has_objectness { 5 } else { 4 };
+        if attr_count <= base + preferred_class_count + 5 {
+            continue;
+        }
+        let extra_dims = attr_count.checked_sub(base + preferred_class_count)?;
+        if extra_dims >= 6 && extra_dims % 3 == 0 {
+            return Some(PredictionAuxLayout {
+                has_objectness,
+                class_count: preferred_class_count,
+                extra_start: base + preferred_class_count,
+            });
+        }
+    }
+    None
+}
+
+fn decode_segment_prediction(
+    prediction: &[f32],
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    aux_layout: PredictionAuxLayout,
+) -> Option<(YoloBox, Vec<f32>)> {
+    let detection = decode_aux_prediction(
+        prediction,
+        meta,
+        class_names,
+        conf_threshold,
+        aux_layout,
+    )?;
+    Some((detection, prediction[aux_layout.extra_start..].to_vec()))
+}
+
+fn decode_pose_prediction(
+    prediction: &[f32],
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    aux_layout: PredictionAuxLayout,
+) -> Option<(YoloBox, Vec<YoloKeypoint>)> {
+    let detection = decode_aux_prediction(
+        prediction,
+        meta,
+        class_names,
+        conf_threshold,
+        aux_layout,
+    )?;
+    let keypoints = prediction[aux_layout.extra_start..]
+        .chunks_exact(3)
+        .map(|chunk| {
+            let [x, y] = restore_point(chunk[0], chunk[1], meta);
+            YoloKeypoint {
+                x,
+                y,
+                conf: normalize_confidence(chunk[2]),
+            }
+        })
+        .collect::<Vec<_>>();
+    Some((detection, keypoints))
+}
+
+fn decode_obb_prediction(
+    prediction: &[f32],
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    aux_layout: PredictionAuxLayout,
+) -> Option<YoloObb> {
+    let detection = decode_aux_prediction(
+        prediction,
+        meta,
+        class_names,
+        conf_threshold,
+        aux_layout,
+    )?;
+    let angle = normalize_obb_angle(*prediction.get(aux_layout.extra_start)?);
+    let center = restore_point(prediction[0], prediction[1], meta);
+    let width = (prediction[2] / meta.scale).max(0.0);
+    let height = (prediction[3] / meta.scale).max(0.0);
+    let corners = oriented_box_corners(center, width, height, angle);
+    let xyxy = corners_to_xyxy(&corners);
+    Some(YoloObb {
+        xywhr: [center[0], center[1], width, height, angle],
+        corners,
+        xyxy,
+        conf: detection.conf,
+        cls: detection.cls,
+        label: detection.label,
+    })
+}
+
+fn decode_aux_prediction(
+    prediction: &[f32],
+    meta: &LetterboxMeta,
+    class_names: &[String],
+    conf_threshold: f32,
+    aux_layout: PredictionAuxLayout,
+) -> Option<YoloBox> {
+    if prediction.len() < aux_layout.extra_start {
+        return None;
+    }
+    let class_start = if aux_layout.has_objectness { 5 } else { 4 };
+    let objectness = if aux_layout.has_objectness {
+        normalize_confidence(prediction[4])
+    } else {
+        1.0
+    };
+    let class_end = class_start + aux_layout.class_count;
+    let class_scores = prediction.get(class_start..class_end)?;
+    let (cls, class_score) = class_scores
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(&right.1))?;
+    let conf = normalize_confidence(class_score) * objectness;
+    if conf < conf_threshold {
+        return None;
+    }
+    let xyxy = restore_box_xywh(
+        [prediction[0], prediction[1], prediction[2], prediction[3]],
+        meta,
+    );
+    Some(YoloBox {
+        xywh: xyxy_to_xywh(xyxy),
+        xyxy,
+        conf,
+        cls,
+        label: class_names
+            .get(cls)
+            .cloned()
+            .unwrap_or_else(|| cls.to_string()),
+    })
+}
+
+fn infer_proto_channels(shape: &[i64]) -> Option<usize> {
+    if shape.len() != 4 {
+        return None;
+    }
+    let c_first = shape[1].max(1) as usize;
+    let c_last = shape[3].max(1) as usize;
+    Some(c_first.min(c_last))
+}
+
+fn decode_rect_mask(meta: &LetterboxMeta, xyxy: &[f32; 4]) -> YoloMask {
+    let width = meta.orig_w;
+    let height = meta.orig_h;
+    let mut data = vec![0_u8; width as usize * height as usize];
+    let x1 = xyxy[0].floor().clamp(0.0, width as f32) as u32;
+    let y1 = xyxy[1].floor().clamp(0.0, height as f32) as u32;
+    let x2 = xyxy[2].ceil().clamp(0.0, width as f32) as u32;
+    let y2 = xyxy[3].ceil().clamp(0.0, height as f32) as u32;
+    for y in y1..y2 {
+        for x in x1..x2 {
+            let index = (y * width + x) as usize;
+            if let Some(cell) = data.get_mut(index) {
+                *cell = 255;
+            }
+        }
+    }
+    YoloMask { width, height, data }
+}
+
+fn decode_mask_from_proto(
+    proto: &OnnxOutputTensor<'_>,
+    coeffs: &[f32],
+    meta: &LetterboxMeta,
+    xyxy: &[f32; 4],
+) -> Result<YoloMask> {
+    if proto.shape.len() != 4 {
+        return Err(anyhow!("unsupported proto shape: {:?}", proto.shape));
+    }
+    let width = meta.orig_w;
+    let height = meta.orig_h;
+    let mut data = vec![0_u8; width as usize * height as usize];
+    if coeffs.is_empty() {
+        return Ok(YoloMask { width, height, data });
+    }
+
+    let (channels, proto_h, proto_w, nchw) = if proto.shape[1].max(1) as usize == coeffs.len() {
+        (
+            proto.shape[1].max(1) as usize,
+            proto.shape[2].max(1) as usize,
+            proto.shape[3].max(1) as usize,
+            true,
+        )
+    } else if proto.shape[3].max(1) as usize == coeffs.len() {
+        (
+            proto.shape[3].max(1) as usize,
+            proto.shape[1].max(1) as usize,
+            proto.shape[2].max(1) as usize,
+            false,
+        )
+    } else {
+        return Err(anyhow!("proto channel count does not match coeffs"));
+    };
+
+    let input_w = (meta.orig_w as f32 * meta.scale + meta.pad_x * 2.0).max(1.0);
+    let input_h = (meta.orig_h as f32 * meta.scale + meta.pad_y * 2.0).max(1.0);
+    let x1 = xyxy[0].floor().clamp(0.0, width as f32) as u32;
+    let y1 = xyxy[1].floor().clamp(0.0, height as f32) as u32;
+    let x2 = xyxy[2].ceil().clamp(0.0, width as f32) as u32;
+    let y2 = xyxy[3].ceil().clamp(0.0, height as f32) as u32;
+
+    for y in y1..y2 {
+        for x in x1..x2 {
+            let x_input = x as f32 * meta.scale + meta.pad_x;
+            let y_input = y as f32 * meta.scale + meta.pad_y;
+            let px = ((x_input / input_w) * proto_w as f32)
+                .floor()
+                .clamp(0.0, (proto_w.saturating_sub(1)) as f32) as usize;
+            let py = ((y_input / input_h) * proto_h as f32)
+                .floor()
+                .clamp(0.0, (proto_h.saturating_sub(1)) as f32) as usize;
+            let mut logit = 0.0_f32;
+            for channel in 0..channels {
+                let proto_index = if nchw {
+                    channel * proto_h * proto_w + py * proto_w + px
+                } else {
+                    py * proto_w * channels + px * channels + channel
+                };
+                logit += coeffs[channel] * proto.values.get(proto_index).copied().unwrap_or(0.0);
+            }
+            if normalize_confidence(logit) >= 0.5 {
+                let index = (y * width + x) as usize;
+                if let Some(cell) = data.get_mut(index) {
+                    *cell = 255;
+                }
+            }
+        }
+    }
+
+    Ok(YoloMask { width, height, data })
+}
+
+fn restore_point(x: f32, y: f32, meta: &LetterboxMeta) -> [f32; 2] {
+    [
+        ((x - meta.pad_x) / meta.scale).clamp(0.0, meta.orig_w as f32),
+        ((y - meta.pad_y) / meta.scale).clamp(0.0, meta.orig_h as f32),
+    ]
+}
+
+fn normalize_obb_angle(value: f32) -> f32 {
+    if value.abs() <= std::f32::consts::PI * 2.0 {
+        value
+    } else {
+        normalize_confidence(value) * std::f32::consts::FRAC_PI_2
+    }
+}
+
+fn oriented_box_corners(center: [f32; 2], width: f32, height: f32, angle: f32) -> [[f32; 2]; 4] {
+    let half_w = width * 0.5;
+    let half_h = height * 0.5;
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let offsets = [
+        [-half_w, -half_h],
+        [half_w, -half_h],
+        [half_w, half_h],
+        [-half_w, half_h],
+    ];
+    offsets.map(|offset| {
+        [
+            center[0] + offset[0] * cos - offset[1] * sin,
+            center[1] + offset[0] * sin + offset[1] * cos,
+        ]
+    })
+}
+
+fn corners_to_xyxy(corners: &[[f32; 2]; 4]) -> [f32; 4] {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for point in corners {
+        min_x = min_x.min(point[0]);
+        min_y = min_y.min(point[1]);
+        max_x = max_x.max(point[0]);
+        max_y = max_y.max(point[1]);
+    }
+    [min_x, min_y, max_x, max_y]
+}
+
+fn normalize_confidence(value: f32) -> f32 {
+    if (0.0..=1.0).contains(&value) {
+        value
+    } else {
+        1.0 / (1.0 + (-value).exp())
+    }
 }
 
 fn decode_single_prediction(
@@ -554,17 +1697,13 @@ fn decode_single_prediction(
         });
     }
 
-    let (objectness, class_scores) = if prediction.len() == class_names.len() + 5 {
-        (prediction[4], &prediction[5..])
-    } else {
-        (1.0, &prediction[4..])
-    };
+    let (objectness, class_scores) = split_detection_prediction(prediction, class_names.len())?;
     let (cls, class_score) = class_scores
         .iter()
         .copied()
         .enumerate()
         .max_by(|left, right| left.1.total_cmp(&right.1))?;
-    let conf = class_score * objectness;
+    let conf = normalize_confidence(class_score) * normalize_confidence(objectness);
     if conf < conf_threshold {
         return None;
     }
@@ -611,17 +1750,83 @@ fn xyxy_to_xywh(xyxy: [f32; 4]) -> [f32; 4] {
 }
 
 fn non_max_suppression(
-    mut detections: Vec<YoloBox>,
+    detections: Vec<YoloBox>,
     iou_threshold: f32,
     max_detections: usize,
 ) -> Vec<YoloBox> {
     let mut selected = Vec::new();
-    while !detections.is_empty() && selected.len() < max_detections {
-        let current = detections.remove(0);
-        detections.retain(|candidate| {
-            candidate.cls != current.cls
-                || intersection_over_union(&current.xyxy, &candidate.xyxy) < iou_threshold
-        });
+    let mut suppressed = vec![false; detections.len()];
+    for index in 0..detections.len() {
+        if suppressed[index] || selected.len() >= max_detections {
+            continue;
+        }
+        let current = detections[index].clone();
+        for candidate_index in (index + 1)..detections.len() {
+            if suppressed[candidate_index] {
+                continue;
+            }
+            if detections[candidate_index].cls == current.cls
+                && intersection_over_union(&current.xyxy, &detections[candidate_index].xyxy) >= iou_threshold
+            {
+                suppressed[candidate_index] = true;
+            }
+        }
+        selected.push(current);
+    }
+    selected
+}
+
+fn non_max_suppression_obb(
+    detections: Vec<YoloObb>,
+    iou_threshold: f32,
+    max_detections: usize,
+) -> Vec<YoloObb> {
+    let mut selected = Vec::new();
+    let mut suppressed = vec![false; detections.len()];
+    for index in 0..detections.len() {
+        if suppressed[index] || selected.len() >= max_detections {
+            continue;
+        }
+        let current = detections[index].clone();
+        for candidate_index in (index + 1)..detections.len() {
+            if suppressed[candidate_index] {
+                continue;
+            }
+            if detections[candidate_index].cls == current.cls
+                && intersection_over_union(&current.xyxy, &detections[candidate_index].xyxy)
+                    >= iou_threshold
+            {
+                suppressed[candidate_index] = true;
+            }
+        }
+        selected.push(current);
+    }
+    selected
+}
+
+fn non_max_suppression_with_aux<T: Clone>(
+    detections: Vec<(YoloBox, T)>,
+    iou_threshold: f32,
+    max_detections: usize,
+) -> Vec<(YoloBox, T)> {
+    let mut selected = Vec::new();
+    let mut suppressed = vec![false; detections.len()];
+    for index in 0..detections.len() {
+        if suppressed[index] || selected.len() >= max_detections {
+            continue;
+        }
+        let current = detections[index].clone();
+        for candidate_index in (index + 1)..detections.len() {
+            if suppressed[candidate_index] {
+                continue;
+            }
+            if detections[candidate_index].0.cls == current.0.cls
+                && intersection_over_union(&current.0.xyxy, &detections[candidate_index].0.xyxy)
+                    >= iou_threshold
+            {
+                suppressed[candidate_index] = true;
+            }
+        }
         selected.push(current);
     }
     selected
@@ -639,6 +1844,51 @@ fn intersection_over_union(left: &[f32; 4], right: &[f32; 4]) -> f32 {
     let right_area = (right[2] - right[0]).max(0.0) * (right[3] - right[1]).max(0.0);
     let union = left_area + right_area - inter;
     if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+fn split_detection_prediction<'a>(
+    prediction: &'a [f32],
+    preferred_class_count: usize,
+) -> Option<(f32, &'a [f32])> {
+    if prediction.len() <= 4 {
+        return None;
+    }
+    if preferred_class_count > 0 {
+        if prediction.len() == preferred_class_count + 5 {
+            return Some((prediction[4], &prediction[5..]));
+        }
+        if prediction.len() == preferred_class_count + 4 {
+            return Some((1.0, &prediction[4..]));
+        }
+    }
+
+    let with_objectness = if prediction.len() > 5 {
+        Some((prediction[4], &prediction[5..]))
+    } else {
+        None
+    };
+    let without_objectness = Some((1.0, &prediction[4..]));
+
+    match (with_objectness, without_objectness) {
+        (Some((obj, scores)), Some((fallback_obj, fallback_scores))) => {
+            let with_score = scores.iter().copied().map(normalize_confidence).fold(0.0_f32, f32::max)
+                * normalize_confidence(obj);
+            let without_score = fallback_scores
+                .iter()
+                .copied()
+                .map(normalize_confidence)
+                .fold(0.0_f32, f32::max)
+                * fallback_obj;
+            if with_score >= without_score {
+                Some((obj, scores))
+            } else {
+                Some((fallback_obj, fallback_scores))
+            }
+        }
+        (Some(value), None) => Some(value),
+        (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 fn draw_box(image: &mut RgbaImage, detection: &YoloBox, color: Rgba<u8>) {
@@ -917,7 +2167,7 @@ where
 {
     let mut emitted = 0_usize;
     decode_stream_frames(source, options, |item| {
-        let result = backend.predict(&item, config)?;
+        let result = backend.predict(&item, config, options.top_k)?;
         emitted += 1;
         on_result(&result)
     })?;
@@ -1219,4 +2469,94 @@ fn is_supported_video_path(path: impl AsRef<Path>) -> bool {
             .iter()
             .any(|candidate| ext.eq_ignore_ascii_case(candidate))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_meta() -> LetterboxMeta {
+        LetterboxMeta {
+            scale: 1.0,
+            pad_x: 0.0,
+            pad_y: 0.0,
+            orig_w: 32,
+            orig_h: 32,
+        }
+    }
+
+    #[test]
+    fn classify_decode_uses_top_k() {
+        let logits = vec![0.1_f32, 4.0, 2.5, 1.0];
+        let output = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![1, 4],
+            values: &logits,
+        };
+        let decoded = decode_yolo_outputs(
+            &[output],
+            &dummy_meta(),
+            &["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()],
+            0.0,
+            0.45,
+            10,
+            Some(2),
+        )
+        .expect("classification decode should succeed");
+        assert_eq!(decoded.task, YoloTaskKind::Classify);
+        assert_eq!(decoded.probs.len(), 2);
+        assert_eq!(decoded.probs[0].label, "b");
+        assert_eq!(decoded.probs[1].label, "c");
+    }
+
+    #[test]
+    fn classify_decode_keeps_best_prediction_when_threshold_filters_all() {
+        let logits = vec![0.1_f32, 0.2, 0.3];
+        let output = OnnxOutputTensor {
+            name: "output0".to_string(),
+            shape: vec![3],
+            values: &logits,
+        };
+        let decoded = decode_yolo_outputs(
+            &[output],
+            &dummy_meta(),
+            &["x".to_string(), "y".to_string(), "z".to_string()],
+            0.99,
+            0.45,
+            10,
+            Some(1),
+        )
+        .expect("classification decode should keep best prediction");
+        assert_eq!(decoded.task, YoloTaskKind::Classify);
+        assert_eq!(decoded.probs.len(), 1);
+        assert_eq!(decoded.probs[0].label, "z");
+    }
+
+    #[test]
+    fn obb_decode_returns_oriented_boxes() {
+        let predictions = vec![
+            16.0_f32, 16.0, 8.0, 4.0, 0.95, 0.3,
+            8.0_f32, 8.0, 2.0, 2.0, 0.10, 0.1,
+        ];
+        let output = OnnxOutputTensor {
+            name: "obb".to_string(),
+            shape: vec![1, 2, 6],
+            values: &predictions,
+        };
+        let decoded = decode_yolo_outputs(
+            &[output],
+            &dummy_meta(),
+            &["plane".to_string()],
+            0.25,
+            0.45,
+            10,
+            None,
+        )
+        .expect("obb decode should succeed");
+        assert_eq!(decoded.task, YoloTaskKind::Obb);
+        assert_eq!(decoded.obb.len(), 1);
+        assert_eq!(decoded.obb[0].label, "plane");
+        assert!(decoded.obb[0].xywhr[2] > 0.0);
+        assert!(decoded.obb[0].xywhr[3] > 0.0);
+    }
 }

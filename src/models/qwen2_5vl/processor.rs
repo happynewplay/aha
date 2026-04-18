@@ -5,7 +5,6 @@ use aha_openai_dive::v1::resources::chat::{
 };
 use anyhow::{Result, anyhow};
 use candle_core::{DType, Device, IndexOp, Shape, Tensor};
-#[cfg(feature = "ffmpeg")]
 use ffmpeg_next as ffmpeg;
 use image::DynamicImage;
 use num::integer::lcm;
@@ -367,7 +366,6 @@ pub fn smart_resize(
     Ok((h_bar, w_bar))
 }
 
-#[cfg(feature = "ffmpeg")]
 pub fn get_video_data(
     file: &String,
     vision_setting: &VisionSetting,

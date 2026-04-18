@@ -63,6 +63,7 @@ impl YoloExec {
             stream: options.stream,
             workers: options.workers.unwrap_or(1).max(1),
             batch_size: options.batch_size.unwrap_or(16).max(1),
+            top_k: None,
             max_frames: options.max_frames,
             frame_stride: options.frame_stride.unwrap_or(1).max(1),
             stop_flag: None,
@@ -99,6 +100,7 @@ impl YoloExec {
             stream: true,
             workers: options.workers.unwrap_or(1).max(1),
             batch_size: options.batch_size.unwrap_or(1).max(1),
+            top_k: None,
             max_frames: options.max_frames,
             frame_stride: options.frame_stride.unwrap_or(1).max(1),
             stop_flag: Some(stop_flag.clone()),
@@ -227,6 +229,15 @@ fn persist_outputs(
     };
     std::fs::write(&json_path, output_json)?;
     println!("Output saved to: {}", json_path.display());
+
+    let coco_json = YoloGenerateModel::results_to_coco_json(results)?;
+    let coco_json_path = if path.extension().is_some() {
+        path.with_extension("coco.json")
+    } else {
+        output_dir.join("results.coco.json")
+    };
+    std::fs::write(&coco_json_path, coco_json)?;
+    println!("COCO output saved to: {}", coco_json_path.display());
 
     for (index, result) in results.iter().enumerate() {
         if let Ok(annotated) = result.plot() {

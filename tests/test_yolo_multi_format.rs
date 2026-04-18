@@ -13,7 +13,7 @@ use aha::models::{
     ArtifactKind, LoadSpec, ModelPaths, WhichModel,
     yolo::{
         generate::YoloGenerateModel,
-        model::{YoloBox, YoloResults, YoloSpeed},
+        model::{YoloBox, YoloResults, YoloSpeed, YoloTaskKind},
     },
 };
 use anyhow::{Context, Result, anyhow};
@@ -137,6 +137,7 @@ fn yolo_model_metadata_is_registered() {
 #[test]
 fn yolo_results_are_json_serializable() {
     let result = YoloResults {
+        task: YoloTaskKind::Detect,
         boxes: vec![YoloBox {
             xyxy: [1.0, 2.0, 3.0, 4.0],
             xywh: [2.0, 3.0, 2.0, 2.0],
@@ -144,6 +145,10 @@ fn yolo_results_are_json_serializable() {
             cls: 0,
             label: "person".to_string(),
         }],
+        masks: Vec::new(),
+        keypoints: Vec::new(),
+        probs: Vec::new(),
+        obb: Vec::new(),
         path: "image.jpg".to_string(),
         names: vec!["person".to_string()],
         speed: YoloSpeed {
@@ -163,9 +168,87 @@ fn yolo_results_are_json_serializable() {
 }
 
 #[test]
+fn yolo_results_are_coco_json_serializable() {
+    let result = YoloResults {
+        task: YoloTaskKind::Detect,
+        boxes: vec![YoloBox {
+            xyxy: [10.0, 20.0, 30.0, 50.0],
+            xywh: [20.0, 35.0, 20.0, 30.0],
+            conf: 0.9,
+            cls: 0,
+            label: "person".to_string(),
+        }],
+        masks: Vec::new(),
+        keypoints: Vec::new(),
+        probs: Vec::new(),
+        obb: Vec::new(),
+        path: "image.jpg".to_string(),
+        names: vec!["person".to_string()],
+        speed: YoloSpeed::default(),
+        width: 64,
+        height: 64,
+        orig_img: None,
+    };
+
+    let json = YoloGenerateModel::results_to_coco_json(&[result]).expect("coco json should serialize");
+    assert!(json.contains("annotations"));
+    assert!(json.contains("categories"));
+    assert!(json.contains("image.jpg"));
+}
+
+#[test]
+fn yolo_results_save_txt_includes_keypoints_and_mask_tokens() -> Result<()> {
+    let temp = std::env::temp_dir().join("aha_yolo_save_txt_enhanced.txt");
+    let result = YoloResults {
+        task: YoloTaskKind::Pose,
+        boxes: vec![YoloBox {
+            xyxy: [1.0, 1.0, 6.0, 6.0],
+            xywh: [3.5, 3.5, 5.0, 5.0],
+            conf: 0.8,
+            cls: 0,
+            label: "person".to_string(),
+        }],
+        masks: vec![aha::models::yolo::model::YoloMask {
+            width: 8,
+            height: 8,
+            data: vec![
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 255, 255, 255, 0, 0, 0,
+                0, 0, 255, 255, 255, 0, 0, 0,
+                0, 0, 255, 255, 255, 0, 0, 0,
+                0, 0, 255, 255, 255, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        }],
+        keypoints: vec![vec![
+            aha::models::yolo::model::YoloKeypoint { x: 2.0, y: 2.0, conf: 0.9 },
+            aha::models::yolo::model::YoloKeypoint { x: 4.0, y: 4.0, conf: 0.8 },
+        ]],
+        probs: Vec::new(),
+        obb: Vec::new(),
+        path: "synthetic.png".to_string(),
+        names: vec!["person".to_string()],
+        speed: YoloSpeed::default(),
+        width: 8,
+        height: 8,
+        orig_img: None,
+    };
+
+    result.save_txt(&temp.to_string_lossy())?;
+    let content = std::fs::read_to_string(&temp)?;
+    let _ = std::fs::remove_file(&temp);
+    assert!(content.contains("kpts"));
+    assert!(content.contains("mask"));
+    Ok(())
+}
+
+#[test]
 fn yolo_results_plot_draws_box() -> Result<()> {
     let base = DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255])));
     let result = YoloResults {
+        task: YoloTaskKind::Detect,
         boxes: vec![YoloBox {
             xyxy: [4.0, 4.0, 20.0, 20.0],
             xywh: [12.0, 12.0, 16.0, 16.0],
@@ -173,6 +256,10 @@ fn yolo_results_plot_draws_box() -> Result<()> {
             cls: 0,
             label: "person".to_string(),
         }],
+        masks: Vec::new(),
+        keypoints: Vec::new(),
+        probs: Vec::new(),
+        obb: Vec::new(),
         path: "synthetic.png".to_string(),
         names: vec!["person".to_string()],
         speed: YoloSpeed::default(),
@@ -313,11 +400,18 @@ fn yolo_exec_persist_outputs_writes_json_png_and_txt() -> Result<()> {
     YoloExec::run_with_spec(&input, Some(&output_dir.to_string_lossy()), &spec)?;
 
     let json_path = output_dir.join("results.json");
+    let coco_json_path = output_dir.join("results.coco.json");
     let txt_path = output_dir.join("result_0.txt");
     if !json_path.exists() {
         return Err(anyhow!(
             "missing expected output json: {}",
             json_path.display()
+        ));
+    }
+    if !coco_json_path.exists() {
+        return Err(anyhow!(
+            "missing expected coco output json: {}",
+            coco_json_path.display()
         ));
     }
     if !txt_path.exists() {
@@ -340,6 +434,9 @@ fn yolo_exec_persist_outputs_writes_json_png_and_txt() -> Result<()> {
         serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
     let array_len = json_value.as_array().map_or(0, |items| items.len());
     assert_eq!(array_len, 1, "expected one json result entry");
+    let coco_json_value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&coco_json_path)?)?;
+    assert!(coco_json_value.get("annotations").is_some());
     Ok(())
 }
 

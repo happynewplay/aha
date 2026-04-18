@@ -47,6 +47,10 @@ impl YoloGenerateModel {
     pub fn results_to_json(results: &[YoloResults]) -> Result<String> {
         YoloModel::results_to_json(results)
     }
+
+    pub fn results_to_coco_json(results: &[YoloResults]) -> Result<String> {
+        YoloModel::results_to_coco_json(results)
+    }
 }
 
 impl GenerateModel for YoloGenerateModel {

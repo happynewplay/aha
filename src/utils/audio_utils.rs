@@ -14,7 +14,6 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use candle_core::{D, DType, Device, IndexOp, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, Module};
-#[cfg(feature = "ffmpeg")]
 use ffmpeg_next as ffmpeg;
 use hound::{SampleFormat, WavReader};
 use num::integer::gcd;
@@ -736,7 +735,6 @@ pub fn extract_and_save_audio_from_response(
     Ok(saved_files)
 }
 
-#[cfg(feature = "ffmpeg")]
 pub fn load_and_resample_audio_ffmpeg(
     file_path: &str,
     target_sample_rate: Option<usize>,
