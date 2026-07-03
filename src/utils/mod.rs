@@ -229,6 +229,7 @@ pub fn crate_tensor_from_reader<R: std::io::Read>(
         DType::F8E4M3 | DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
             Err(anyhow!(format!("UnsupportedDTypeForOp '{:?}'", dtype)))
         }
+        _ => Err(anyhow!("Unsupported DType: {:?}", dtype)),
     }
 }
 

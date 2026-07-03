@@ -215,10 +215,7 @@ impl YoloExec {
             let avg_latency_ms = latency_total_ms as f64 / frame_count as f64;
             eprintln!(
                 "[yolo-stream] summary frames={} fps={:.2} latency_ms(avg={:.2}) total_elapsed_s={:.2}",
-                frame_count,
-                fps,
-                avg_latency_ms,
-                elapsed,
+                frame_count, fps, avg_latency_ms, elapsed,
             );
         }
 

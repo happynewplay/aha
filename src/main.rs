@@ -551,7 +551,11 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
                 iou_threshold: args.iou,
                 max_detections: args.max_detections,
                 task_kind: args.task,
-                nms_class_agnostic: if args.nms_class_agnostic { Some(true) } else { None },
+                nms_class_agnostic: if args.nms_class_agnostic {
+                    Some(true)
+                } else {
+                    None
+                },
                 keypoint_confidence_threshold: args.keypoint_conf,
                 keep_images: args.keep_images,
                 class_names: args.class_names.clone(),

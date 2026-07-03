@@ -79,7 +79,7 @@ impl TokenizerModel {
 
                     // 添加所有特殊标记
                     if !special_tokens.is_empty() {
-                        tokenizer.add_special_tokens(&special_tokens);
+                        let _ = tokenizer.add_special_tokens(special_tokens);
                     }
                 }
             }

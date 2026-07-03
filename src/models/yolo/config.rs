@@ -35,11 +35,16 @@ pub struct YoloConfig {
     pub keep_images: bool,
 }
 
-pub fn serialize_arc_slice<S: serde::Serializer>(val: &Arc<[String]>, s: S) -> Result<S::Ok, S::Error> {
+pub fn serialize_arc_slice<S: serde::Serializer>(
+    val: &Arc<[String]>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
     s.collect_seq(val.iter())
 }
 
-pub fn deserialize_arc_slice<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Arc<[String]>, D::Error> {
+pub fn deserialize_arc_slice<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Arc<[String]>, D::Error> {
     let vec: Vec<String> = Vec::deserialize(d)?;
     Ok(vec.into())
 }
@@ -69,19 +74,31 @@ impl YoloConfig {
     pub fn validate(self) -> Self {
         let mut config = self;
         if config.confidence_threshold < 0.0 {
-            eprintln!("[yolo] warning: confidence_threshold={} is negative, clamping to 0.0", config.confidence_threshold);
+            eprintln!(
+                "[yolo] warning: confidence_threshold={} is negative, clamping to 0.0",
+                config.confidence_threshold
+            );
             config.confidence_threshold = 0.0;
         }
         if config.confidence_threshold > 1.0 {
-            eprintln!("[yolo] warning: confidence_threshold={} > 1.0, clamping to 1.0", config.confidence_threshold);
+            eprintln!(
+                "[yolo] warning: confidence_threshold={} > 1.0, clamping to 1.0",
+                config.confidence_threshold
+            );
             config.confidence_threshold = 1.0;
         }
         if config.iou_threshold < 0.0 {
-            eprintln!("[yolo] warning: iou_threshold={} is negative, clamping to 0.0", config.iou_threshold);
+            eprintln!(
+                "[yolo] warning: iou_threshold={} is negative, clamping to 0.0",
+                config.iou_threshold
+            );
             config.iou_threshold = 0.0;
         }
         if config.iou_threshold > 1.0 {
-            eprintln!("[yolo] warning: iou_threshold={} > 1.0, clamping to 1.0", config.iou_threshold);
+            eprintln!(
+                "[yolo] warning: iou_threshold={} > 1.0, clamping to 1.0",
+                config.iou_threshold
+            );
             config.iou_threshold = 1.0;
         }
         if config.max_detections == 0 {
@@ -89,11 +106,17 @@ impl YoloConfig {
             config.max_detections = 1;
         }
         if config.keypoint_confidence_threshold < 0.0 {
-            eprintln!("[yolo] warning: keypoint_confidence_threshold={} is negative, clamping to 0.0", config.keypoint_confidence_threshold);
+            eprintln!(
+                "[yolo] warning: keypoint_confidence_threshold={} is negative, clamping to 0.0",
+                config.keypoint_confidence_threshold
+            );
             config.keypoint_confidence_threshold = 0.0;
         }
         if config.keypoint_confidence_threshold > 1.0 {
-            eprintln!("[yolo] warning: keypoint_confidence_threshold={} > 1.0, clamping to 1.0", config.keypoint_confidence_threshold);
+            eprintln!(
+                "[yolo] warning: keypoint_confidence_threshold={} > 1.0, clamping to 1.0",
+                config.keypoint_confidence_threshold
+            );
             config.keypoint_confidence_threshold = 1.0;
         }
         if config.image_size == 0 {
@@ -106,93 +129,95 @@ impl YoloConfig {
 
 pub fn default_coco_class_names() -> Arc<[String]> {
     static CACHE: OnceLock<Arc<[String]>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        [
-            "person",
-            "bicycle",
-            "car",
-            "motorcycle",
-            "airplane",
-            "bus",
-            "train",
-            "truck",
-            "boat",
-            "traffic light",
-            "fire hydrant",
-            "stop sign",
-            "parking meter",
-            "bench",
-            "bird",
-            "cat",
-            "dog",
-            "horse",
-            "sheep",
-            "cow",
-            "elephant",
-            "bear",
-            "zebra",
-            "giraffe",
-            "backpack",
-            "umbrella",
-            "handbag",
-            "tie",
-            "suitcase",
-            "frisbee",
-            "skis",
-            "snowboard",
-            "sports ball",
-            "kite",
-            "baseball bat",
-            "baseball glove",
-            "skateboard",
-            "surfboard",
-            "tennis racket",
-            "bottle",
-            "wine glass",
-            "cup",
-            "fork",
-            "knife",
-            "spoon",
-            "bowl",
-            "banana",
-            "apple",
-            "sandwich",
-            "orange",
-            "broccoli",
-            "carrot",
-            "hot dog",
-            "pizza",
-            "donut",
-            "cake",
-            "chair",
-            "couch",
-            "potted plant",
-            "bed",
-            "dining table",
-            "toilet",
-            "tv",
-            "laptop",
-            "mouse",
-            "remote",
-            "keyboard",
-            "cell phone",
-            "microwave",
-            "oven",
-            "toaster",
-            "sink",
-            "refrigerator",
-            "book",
-            "clock",
-            "vase",
-            "scissors",
-            "teddy bear",
-            "hair drier",
-            "toothbrush",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-    }).clone()
+    CACHE
+        .get_or_init(|| {
+            [
+                "person",
+                "bicycle",
+                "car",
+                "motorcycle",
+                "airplane",
+                "bus",
+                "train",
+                "truck",
+                "boat",
+                "traffic light",
+                "fire hydrant",
+                "stop sign",
+                "parking meter",
+                "bench",
+                "bird",
+                "cat",
+                "dog",
+                "horse",
+                "sheep",
+                "cow",
+                "elephant",
+                "bear",
+                "zebra",
+                "giraffe",
+                "backpack",
+                "umbrella",
+                "handbag",
+                "tie",
+                "suitcase",
+                "frisbee",
+                "skis",
+                "snowboard",
+                "sports ball",
+                "kite",
+                "baseball bat",
+                "baseball glove",
+                "skateboard",
+                "surfboard",
+                "tennis racket",
+                "bottle",
+                "wine glass",
+                "cup",
+                "fork",
+                "knife",
+                "spoon",
+                "bowl",
+                "banana",
+                "apple",
+                "sandwich",
+                "orange",
+                "broccoli",
+                "carrot",
+                "hot dog",
+                "pizza",
+                "donut",
+                "cake",
+                "chair",
+                "couch",
+                "potted plant",
+                "bed",
+                "dining table",
+                "toilet",
+                "tv",
+                "laptop",
+                "mouse",
+                "remote",
+                "keyboard",
+                "cell phone",
+                "microwave",
+                "oven",
+                "toaster",
+                "sink",
+                "refrigerator",
+                "book",
+                "clock",
+                "vase",
+                "scissors",
+                "teddy bear",
+                "hair drier",
+                "toothbrush",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        })
+        .clone()
 }
 
 #[cfg(test)]

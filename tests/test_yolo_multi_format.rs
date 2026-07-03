@@ -190,7 +190,8 @@ fn yolo_results_are_coco_json_serializable() {
         orig_img: None,
     };
 
-    let json = YoloGenerateModel::results_to_coco_json(&[result]).expect("coco json should serialize");
+    let json =
+        YoloGenerateModel::results_to_coco_json(&[result]).expect("coco json should serialize");
     assert!(json.contains("annotations"));
     assert!(json.contains("categories"));
     assert!(json.contains("image.jpg"));
@@ -212,19 +213,22 @@ fn yolo_results_save_txt_includes_keypoints_and_mask_tokens() -> Result<()> {
             width: 8,
             height: 8,
             data: vec![
-                0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 255, 255, 255, 0, 0, 0,
-                0, 0, 255, 255, 255, 0, 0, 0,
-                0, 0, 255, 255, 255, 0, 0, 0,
-                0, 0, 255, 255, 255, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 0, 0, 0,
+                0, 0, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
         }],
         keypoints: vec![vec![
-            aha::models::yolo::model::YoloKeypoint { x: 2.0, y: 2.0, conf: 0.9 },
-            aha::models::yolo::model::YoloKeypoint { x: 4.0, y: 4.0, conf: 0.8 },
+            aha::models::yolo::model::YoloKeypoint {
+                x: 2.0,
+                y: 2.0,
+                conf: 0.9,
+            },
+            aha::models::yolo::model::YoloKeypoint {
+                x: 4.0,
+                y: 4.0,
+                conf: 0.8,
+            },
         ]],
         probs: Vec::new(),
         obb: Vec::new(),

@@ -207,7 +207,7 @@ impl<R: Read + Seek> Gguf<R> {
                         add_tokens.push(add_token);
                     }
                 }
-                let _ = tokenizer.add_special_tokens(&add_tokens);
+                let _ = tokenizer.add_special_tokens(add_tokens);
                 let tokenizer_model = TokenizerModel::new(tokenizer);
                 Ok(tokenizer_model)
             }
