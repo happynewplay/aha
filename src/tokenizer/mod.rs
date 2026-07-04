@@ -79,7 +79,7 @@ impl TokenizerModel {
 
                     // 添加所有特殊标记
                     if !special_tokens.is_empty() {
-                        tokenizer.add_special_tokens(&special_tokens);
+                        let _ = tokenizer.add_special_tokens(special_tokens);
                     }
                 }
             }
@@ -107,14 +107,6 @@ impl TokenizerModel {
         let decode = self
             .tokenizer
             .decode(&tokens, true)
-            .map_err(|e| anyhow!(format!("tokenizer encode error{}", e)))?;
-        Ok(decode)
-    }
-
-    pub fn token_decode_with_special(&self, tokens: Vec<u32>) -> Result<String> {
-        let decode = self
-            .tokenizer
-            .decode(&tokens, false)
             .map_err(|e| anyhow!(format!("tokenizer encode error{}", e)))?;
         Ok(decode)
     }

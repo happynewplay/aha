@@ -1,8 +1,8 @@
 use aha::models::{
     deepseek_ocr::config::DeepseekOCRConfig, hunyuan_ocr::config::HunYuanVLConfig,
-    lfm2::config::Lfm2Config, minicpm4::config::MiniCPM4Config,
-    paddleocr_vl::config::PaddleOCRVLConfig, qwen2_5vl::config::Qwen2_5VLConfig,
-    qwen3vl::config::Qwen3VLConfig, voxcpm::config::VoxCPMConfig,
+    minicpm4::config::MiniCPM4Config, paddleocr_vl::config::PaddleOCRVLConfig,
+    qwen2_5vl::config::Qwen2_5VLConfig, qwen3vl::config::Qwen3VLConfig,
+    voxcpm::config::VoxCPMConfig,
 };
 use anyhow::Result;
 
@@ -82,19 +82,6 @@ fn paddleocr_vl_config() -> Result<()> {
     let model_path = "/home/jhq/huggingface_model/PaddlePaddle/PaddleOCR-VL/";
     let config_path = model_path.to_string() + "/config.json";
     let config: PaddleOCRVLConfig = serde_json::from_slice(&std::fs::read(config_path)?)?;
-    println!("{:?}", config);
-    Ok(())
-}
-
-#[test]
-fn lfm2_config() -> Result<()> {
-    // cargo test -F cuda --test config_tests lfm2_config -r -- --nocapture
-    let model_path = "/home/jhq/.aha/LiquidAI/LFM2-1.2B/";
-    // let model_path = "/home/jhq/.aha/LiquidAI/LFM2.5-1.2B-Instruct/";
-    let config_path = model_path.to_string() + "/config.json";
-    let mut config: Lfm2Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
-    println!("{:?}", config);
-    config.full_attn_idx2layer_type();
     println!("{:?}", config);
     Ok(())
 }

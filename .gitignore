@@ -21,3 +21,18 @@ bak
 
 demos
 benchmarks
+
+lib/*.lib
+lib/*.pdb
+
+findings.md
+modify_test.md
+progress.md
+task_plan.md
+.codegraph
+.mcp
+target_verify
+*.log
+*.py
+*.log
+target_verify/

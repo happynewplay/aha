@@ -7,7 +7,7 @@ use rocket::futures::StreamExt;
 
 #[test]
 fn qwen3_0_6b_generate() -> Result<()> {
-    // test with cuda: RUST_BACKTRACE=1 cargo test -F cuda --test test_qwen3 qwen3_0_6b_generate -r -- --nocapture
+    // test with cuda: RUST_BACKTRACE=1 cargo test -F cuda qwen3_0_6b_generate -r -- --nocapture
     // test with cuda+flash-attn: RUST_BACKTRACE=1 cargo test -F cuda,flash-attn qwen3_0_6b_generate -r -- --nocapture
 
     let save_dir =

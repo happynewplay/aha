@@ -63,6 +63,30 @@ impl GlmOcrProcessor {
         })
     }
 
+    pub fn from_params(
+        image_mean: Vec<f32>,
+        image_std: Vec<f32>,
+        shortest_edge: usize,
+        longest_edge: usize,
+        patch_size: usize,
+        merge_size: usize,
+        temporal_patch_size: usize,
+        device: &Device,
+        dtype: DType,
+    ) -> Self {
+        Self {
+            image_mean,
+            image_std,
+            shortest_edge,
+            longest_edge,
+            patch_size,
+            merge_size,
+            temporal_patch_size,
+            device: device.clone(),
+            dtype,
+        }
+    }
+
     /// Process image for vision encoder.
     ///
     /// Matches Python's Glm46VImageProcessor._preprocess():

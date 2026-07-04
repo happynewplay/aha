@@ -25,12 +25,9 @@
 aha 是一款基于 Rust 和 Candle 框架构建的高性能跨平台 AI 推理引擎。将最先进的 AI 模型带到您的本地机器——无需 API 密钥，无需云依赖，纯粹、快速的 AI，直接在您的硬件上运行。
 
 ## 更新日志
-### v0.2.4 (2026-03-23)
-- 新增 LFM2.5-1.2B-Instruct
-- 新增 LFM2-1.2B
-
 ### v0.2.3 (2026-03-18)
 - 新增 DeepSeek-OCR-2
+- 增加 GLM-OCR 的 GGUF 和 ONNX 本地加载
 
 ### 2026-03-17
 - 新增 PaddleOCR-VL1.5 模型
@@ -100,10 +97,90 @@ aha -m qwen3asr-0.6b
 # 直接运行推理（无需启动服务）
 aha run -m qwen3asr-0.6b -i "audio.wav"
 
+# 本地运行 all-MiniLM-L6-v2 向量模型（原生 safetensors）
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --weight-path D:\model_download\all-MiniLM-L6-v2
+
+# 本地运行 all-MiniLM-L6-v2 向量模型（GGUF）
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --artifact-format gguf --gguf-path D:\model_download\All-MiniLM-L6-v2-Embedding-GGUF --tokenizer-dir D:\model_download\all-MiniLM-L6-v2
+
+# 本地运行 all-MiniLM-L6-v2 向量模型（ONNX）
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --artifact-format onnx --onnx-path D:\model_download\all-MiniLM-L6-v2\onnx --tokenizer-dir D:\model_download\all-MiniLM-L6-v2
+
+# 本地运行 GLM-OCR（GGUF）
+aha run -m glm-ocr -i .\assets\img\ocr_test1.png --artifact-format gguf --gguf-path D:\model_download\GLM-OCR-GGUF
+
+# 本地运行 GLM-OCR（ONNX）
+aha run -m glm-ocr -i .\assets\img\ocr_test1.png --artifact-format onnx --onnx-path D:\model_download\GLM-OCR-ONNX --tokenizer-dir D:\model_download\GLM-OCR-ONNX
+
 # 仅启动服务（模型已下载）
 aha serv -m qwen3asr-0.6b -p 10100
 
+
+
+
 ```
+
+### 使用本地模型权重
+
+如果您已经在本地磁盘上下载了模型权重，可以通过路径参数跳过自动下载，直接加载已有的模型。
+
+#### 参数说明
+
+| 参数 | 说明 | 适用格式 |
+|------|------|----------|
+| `--weight-path <路径>` | 包含 safetensors 权重的目录 | Safetensors（默认） |
+| `--artifact-format {auto,safetensors,gguf,onnx}` | 模型文件格式 | GGUF / ONNX |
+| `--gguf-path <路径>` | GGUF 模型文件或目录路径 | GGUF |
+| `--onnx-path <路径>` | ONNX 模型文件或目录路径 | ONNX |
+| `--tokenizer-dir <路径>` | tokenizer 配置文件目录 | GGUF / ONNX |
+| `--mmproj-path <路径>` | 多模态项目 GGUF 权重路径 | 多模态 GGUF |
+
+#### Safetensors（默认格式）
+
+Safetensors 是默认的文件格式。通过 `--weight-path` 指向包含权重文件的目录即可：
+
+```bash
+# 向量模型
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --weight-path D:\models\all-MiniLM-L6-v2
+
+# 文本模型
+aha run -m qwen3-0.6b -i "Hello" --weight-path D:\models\qwen3-0.6b
+```
+
+#### GGUF
+
+对于 GGUF 格式，设置 `--artifact-format gguf`，并通过 `--gguf-path` 指向 `.gguf` 文件或目录：
+
+```bash
+# 文本生成（量化 GGUF）
+aha run -m qwen3-0.6b -i "Hello" --artifact-format gguf --gguf-path D:\models\qwen3-0.6b-Q4_K_M.gguf --tokenizer-dir D:\models\tokenizer
+
+# 多模态 + MMProj（视觉 + 文本）
+aha run -m qwen3-0.6b -i "描述这张图片" --artifact-format gguf --gguf-path D:\models\qwen3-0.6b-Q4_K_M.gguf --tokenizer-dir D:\models\tokenizer --mmproj-path D:\models\mmproj.gguf
+
+# OCR
+aha run -m glm-ocr -i ocr.png --artifact-format gguf --gguf-path D:\models\GLM-OCR-GGUF
+```
+
+#### ONNX
+
+对于 ONNX 模型，设置 `--artifact-format onnx`，并通过 `--onnx-path` 提供 ONNX 文件或目录：
+
+```bash
+# 向量模型
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --artifact-format onnx --onnx-path D:\models\onnx --tokenizer-dir D:\models\tokenizer
+
+# OCR
+aha run -m glm-ocr -i ocr.png --artifact-format onnx --onnx-path D:\models\GLM-OCR-ONNX --tokenizer-dir D:\models\GLM-OCR-ONNX
+
+
+aha serv -m minicpm5-1b --weight-path D:/model_download/MiniCPM5-1B -p 10100
+
+aha serv -m minicpm5-1b --gguf-path D:/model_download/MiniCPM5-1B-GGUF/MiniCPM5-1B-Q4_K_M.gguf -p 10100
+
+```
+
+> **注意：** 使用 GGUF 或 ONNX 格式时，需要通过 `--tokenizer-dir` 提供 tokenizer 配置文件。使用多模态 GGUF 模型（如 Qwen3-VL）时，还需要 `--mmproj-path`。
 
 ### 对话
 
@@ -128,13 +205,13 @@ curl http://localhost:10100/chat/completions \
 
 | 类别 | 模型 |
 |------|------|
-| **文本** | Qwen3, MiniCPM4, <br> LFM2-1.2B, LFM2.5-1.2B-Instruct |
-| **视觉** | Qwen2.5-VL, Qwen3-VL, Qwen3.5 |
-| **OCR** | DeepSeek-OCR, DeepSeek-OCR-2 , <br> , PaddleOCR-VL, PaddleOCR-VL1.5, <br> Hunyuan-OCR, GLM-OCR |
+| **文本** | Qwen3, MiniCPM4 |
+| **向量** | Qwen3-Embedding, all-MiniLM-L6-v2 |
+| **视觉** | Qwen2.5-VL, Qwen3-VL |
+| **OCR** | DeepSeek-OCR, Hunyuan-OCR, PaddleOCR-VL |
 | **ASR** | GLM-ASR-Nano, Fun-ASR-Nano,Qwen3-ASR |
 | **音频** | VoxCPM, VoxCPM1.5 |
 | **图像** | RMBG-2.0 (背景移除) |
-
 
 ## 文档
 

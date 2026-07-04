@@ -6,10 +6,25 @@ aha 支持多个领域的最先进 AI 模型集合。
 
 | 模型 | 参数量 | 描述 | 使用场景 | 开源协议 |
 |------|--------|------|----------|---------|
-| **Qwen3-0.6B** | 0.6B | 最新一代 | 高级推理 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3-0.6B** | 0.6B | 最新一代（safetensors / gguf / onnx） | 高级推理 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **MiniCPM4-0.5B** | 0.5B | 高效轻量级 | 边缘部署 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| **LFM2-1.2B** | 1.2B | 高效轻量级 | 边缘部署 | [lfm1.0](https://huggingface.co/LiquidAI/LFM2-1.2B/blob/main/LICENSE) |
-| **LFM2.5-1.2B-Instruct** | 1.2B | 高效轻量级 | 边缘部署 | [lfm1.0](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/blob/main/LICENSE) |
+
+## Embedding
+
+| 模型 | 参数量 | 描述 | 开源协议 |
+|------|--------|------|---------|
+| **Qwen3-Embedding-0.6B** | 0.6B | 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3-Embedding-4B** | 4B | 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3-Embedding-8B** | 8B | 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **all-MiniLM-L6-v2** | 22M | sentence-transformers 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/blob/main/LICENSE) |
+
+## Reranker
+
+| 模型 | 参数量 | 描述 | 开源协议 |
+|------|--------|------|---------|
+| **Qwen3-Reranker-0.6B** | 0.6B | 文本重排（embedding-similarity 基线，safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3-Reranker-4B** | 4B | 文本重排（embedding-similarity 基线，safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3-Reranker-8B** | 8B | 文本重排（embedding-similarity 基线，safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 
 ## 视觉与多模态
 
@@ -21,10 +36,22 @@ aha 支持多个领域的最先进 AI 模型集合。
 | **Qwen3-VL-4B** | 4B | 增强多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **Qwen3-VL-8B** | 8B | 增强多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **Qwen3-VL-32B** | 32B | 增强多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| **Qwen3.5-0.8B** | 0.8B | 原生多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| **Qwen3.5-2B** | 2B | 原生多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| **Qwen3.5-4B** | 4B | 原生多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| **Qwen3.5-9B** | 9B | 原生多模态 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3.5-0.8B** | 0.8B | 原生多模态（safetensors / gguf / onnx 文本+图片，视频/音频显式拒绝） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3.5-2B** | 2B | 原生多模态（safetensors / gguf / onnx 文本+图片，视频/音频显式拒绝） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3.5-4B** | 4B | 原生多模态（safetensors / gguf / onnx 文本+图片，视频/音频显式拒绝） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3.5-9B** | 9B | 原生多模态（safetensors / gguf / onnx 文本+图片，视频/音频显式拒绝） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2** | 9B | Qwen3.5 同构蒸馏版本（safetensors / gguf / onnx 文本+图片，视频/音频显式拒绝） | [HF 页面许可证](https://huggingface.co/Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2) |
+
+### Qwen3.5 GGUF 仓库来源（复用现有运行时）
+
+- Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF
+- Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF
+- unsloth/Qwen3.5-0.8B-GGUF
+- unsloth/Qwen3.5-2B-GGUF
+- unsloth/Qwen3.5-4B-GGUF
+- lmstudio-community/Qwen3.5-0.8B-GGUF
+- lmstudio-community/Qwen3.5-2B-GGUF
+- lmstudio-community/Qwen3.5-4B-GGUF
 
 ## OCR
 
@@ -35,6 +62,8 @@ aha 支持多个领域的最先进 AI 模型集合。
 | **Hunyuan-OCR** | 中文 | 深度学习 | 复杂布局 | [腾讯混元社区许可协议](https://huggingface.co/tencent/HunyuanOCR/blob/main/LICENSE) |
 | **DeepSeek-OCR** | 多语言 | 场景文字 | 自然图像 | [MIT](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/mit.md) |
 | **GLM-OCR** | 8 | 场景文字 | 复杂文档 | [MIT](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/mit.md) |
+
+GLM-OCR 本地制品格式：`safetensors`、`gguf`、`onnx`
 
 ## 语音识别 (ASR)
 
@@ -65,6 +94,57 @@ aha 支持多个领域的最先进 AI 模型集合。
 
 - [Hugging Face](https://huggingface.co) - 主模型中心
 - [ModelScope](https://modelscope.cn) - 中文模型中心
+
+## 已收录仓库（当前运行时暂未直接接入）
+
+以下仓库已纳入项目模型目录，但当前 `aha` 运行时尚不能直接推理：
+
+### MLX / 特定格式变体
+- Jackrong/MLX-Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2-4bit
+- Jackrong/MLX-Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-4bit
+- Jackrong/MLX-Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-6bit
+- Jackrong/MLX-Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-v2-8bit
+- Jackrong/MLX-Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-4bit
+- Jackrong/MLX-Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-6bit
+- Jackrong/MLX-Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-8bit
+
+### Embedding 模型
+- google/embeddinggemma-300m
+- ggml-org/embeddinggemma-300M-GGUF
+- onnx-community/embeddinggemma-300m-ONNX
+- unsloth/embeddinggemma-300m-GGUF
+- onnx-community/Qwen3-Embedding-0.6B-ONNX
+- Qwen/Qwen3-Embedding-0.6B-GGUF
+- onnx-community/Qwen3-Embedding-4B-ONNX
+- Qwen/Qwen3-Embedding-4B-GGUF
+- Qwen/Qwen3-Embedding-8B-GGUF
+- onnx-community/Qwen3-Embedding-8B-ONNX
+- perplexity-ai/pplx-embed-v1-0.6b
+- nomic-ai/nomic-embed-text-v2-moe
+- nomic-ai/nomic-embed-text-v2-moe-GGUF
+- jinaai/jina-embeddings-v5-text-small
+- jinaai/jina-embeddings-v5-text-nano
+- jinaai/jina-embeddings-v5-text-small-text-matching
+- jinaai/jina-embeddings-v5-text-small-text-matching-GGUF
+- sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+### Reranker 模型
+- BAAI/bge-reranker-v2-m3
+- ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF
+
+### ONNX 仓库
+- onnx-community/GLM-OCR-ONNX
+- onnx-community/Qwen3-Reranker-0.6B-ONNX
+- onnx-community/Qwen3.5-2B-ONNX
+- onnx-community/Qwen3.5-4B-ONNX
+- onnx-community/Qwen3.5-0.8B-ONNX
+- onnx-community/Qwen3-VL-2B-Instruct-ONNX
+- onnx-community/ONNX_Qwen3-Embedding-0.6B
+- onnx-community/Nanbeige4.1-3B-ONNX
+- onnx-community/Qwen3-Embedding-8B-ONNX
+- onnx-community/Qwen3-Embedding-4B-ONNX
+- onnx-community/bge-reranker-v2-m3-ONNX
+- onnx-community/all-MiniLM-L6-v2-ONNX
 
 ## 添加新模型
 

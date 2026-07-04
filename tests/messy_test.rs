@@ -35,18 +35,14 @@ async fn download_test() -> Result<()> {
 #[test]
 fn messy_test() -> Result<()> {
     // RUST_BACKTRACE=1 cargo test -F cuda --test messy_test messy_test -r -- --nocapture
-    // let t1 = Tensor::randn(0.0, 1.0, (1, 2, 6), device)?;
-    // println!(" t1: {}", t1);
-    // let t2 = t1.pad_with_zeros(D::Minus1, -3, 0)?;
-    // println!(" t2: {}", t);
-    // let save_dir =
-    //     aha::utils::get_default_save_dir().ok_or(anyhow::anyhow!("Failed to get save dir"))?;
-    // let model_path = format!("{}/deepseek-ai/DeepSeek-OCR-2/", save_dir);
-    // let stem = std::path::Path::new(&model_path)
-    //     .file_name()
-    //     .and_then(|s| s.to_str())
-    //     .unwrap_or("qwen3.5");
-    // println!("stem: {:?}", stem);
+    let save_dir =
+        aha::utils::get_default_save_dir().ok_or(anyhow::anyhow!("Failed to get save dir"))?;
+    let model_path = format!("{}/deepseek-ai/DeepSeek-OCR-2/", save_dir);
+    let stem = std::path::Path::new(&model_path)
+        .file_stem() // 获取文件名主干（不含扩展名）
+        .and_then(|s| s.to_str())
+        .unwrap_or("qwen3.5");
+    println!("stem: {:?}", stem);
     // let device = &candle_core::Device::Cpu;
     // let t1 = Tensor::randn(0.0, 1.0, (16, 9, 64, 128), device)?;
     // let t2 = Tensor::randn(0.0, 1.0, (16, 9, 128, 64), device)?;

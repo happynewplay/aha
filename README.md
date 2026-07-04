@@ -25,12 +25,9 @@
 aha is a high-performance, cross-platform AI inference engine built with Rust and the Candle framework. It brings state-of-the-art AI models to your local machine—no API keys, no cloud dependencies, just pure, fast AI running directly on your hardware.
 
 ## Changelog
-### v0.2.4 (2026-03-23)
-- add LFM2.5-1.2B-Instruct
-- add LFM2-1.2B
-
 ### v0.2.3 (2026-03-18)
 - add DeepSeek-OCR-2
+- add GLM-OCR gguf and onnx local loading
 
 ### 2026-03-17
 - add PaddleOCR-VL1.5 model
@@ -52,6 +49,9 @@ aha is a high-performance, cross-platform AI inference engine built with Rust an
 
 ### v0.2.1 (2026-03-05)
 - Added Qwen3.5 model
+
+### 2026-03-01
+- update interpolate.rs
 
 
 **[View full changelog](docs/changelog.md)** →
@@ -98,9 +98,95 @@ aha -m qwen3asr-0.6b
 # Run inference directly (without starting service)
 aha run -m qwen3asr-0.6b -i "audio.wav"
 
+# Run local all-MiniLM-L6-v2 embedding (native safetensors)
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --weight-path D:\model_download\all-MiniLM-L6-v2
+
+# Run local all-MiniLM-L6-v2 embedding (GGUF)
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --artifact-format gguf --gguf-path D:\model_download\All-MiniLM-L6-v2-Embedding-GGUF --tokenizer-dir D:\model_download\all-MiniLM-L6-v2
+
+# Run local all-MiniLM-L6-v2 embedding (ONNX)
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --artifact-format onnx --onnx-path D:\model_download\all-MiniLM-L6-v2\onnx --tokenizer-dir D:\model_download\all-MiniLM-L6-v2
+
+# Run local GLM-OCR (GGUF)
+aha run -m glm-ocr -i .\assets\img\ocr_test1.png --artifact-format gguf --gguf-path D:\model_download\GLM-OCR-GGUF
+
+# Run local GLM-OCR (ONNX)
+aha run -m glm-ocr -i .\assets\img\ocr_test1.png --artifact-format onnx --onnx-path D:\model_download\GLM-OCR-ONNX --tokenizer-dir D:\model_download\GLM-OCR-ONNX
+
 # Start service only (model already downloaded)
 aha serv -m qwen3asr-0.6b -p 10100
 
+```
+
+### Using Local Model Weights
+
+If you already have model weights downloaded on disk, you can skip the automatic download and load them directly using the path options below.
+
+#### Parameters
+
+| Parameter | Description | Required For |
+|-----------|-------------|--------------|
+| `--weight-path <path>` | Directory containing safetensors weights | Safetensors (default) |
+| `--artifact-format {auto,safetensors,gguf,onnx}` | Model artifact format | GGUF / ONNX |
+| `--gguf-path <path>` | Path to a GGUF model file or directory | GGUF |
+| `--onnx-path <path>` | Path to an ONNX model file or directory | ONNX |
+| `--tokenizer-dir <path>` | Directory containing tokenizer config files | GGUF / ONNX |
+| `--mmproj-path <path>` | Path to multimodal project GGUF weights | Multimodal GGUF |
+
+#### Safetensors (Default)
+
+Safetensors is the default artifact format. Simply provide the directory containing the weight files via `--weight-path`:
+
+```bash
+# Embedding model
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --weight-path D:\models\all-MiniLM-L6-v2
+
+# Text model
+aha run -m qwen3-0.6b -i "Hello" --weight-path D:\models\qwen3-0.6b
+```
+
+#### GGUF
+
+For GGUF weights, set `--artifact-format gguf` and point `--gguf-path` at the `.gguf` file or directory containing it:
+
+```bash
+# Text generation with quantized GGUF
+aha run -m qwen3-0.6b -i "Hello" --artifact-format gguf --gguf-path D:\models\qwen3-0.6b-Q4_K_M.gguf --tokenizer-dir D:\models\tokenizer
+
+# Multimodal with MMProj (vision + text)
+aha run -m qwen3-0.6b -i "Describe this image" --artifact-format gguf --gguf-path D:\models\qwen3-0.6b-Q4_K_M.gguf --tokenizer-dir D:\models\tokenizer --mmproj-path D:\models\mmproj.gguf
+
+# OCR
+aha run -m glm-ocr -i ocr.png --artifact-format gguf --gguf-path D:\models\GLM-OCR-GGUF
+```
+
+#### ONNX
+
+For ONNX models, set `--artifact-format onnx` and provide the ONNX directory/file via `--onnx-path`:
+
+```bash
+# Embedding model
+aha run -m all-minilm-l6-v2 -i "Rust embedding test" --artifact-format onnx --onnx-path D:\models\onnx --tokenizer-dir D:\models\tokenizer
+
+# OCR
+aha run -m glm-ocr -i ocr.png --artifact-format onnx --onnx-path D:\models\GLM-OCR-ONNX --tokenizer-dir D:\models\GLM-OCR-ONNX
+```
+
+> **Note:** When using GGUF or ONNX formats, `--tokenizer-dir` is required to load the tokenizer configuration. When using multimodal GGUF models (e.g. Qwen3-VL), `--mmproj-path` is also required.
+
+#### Start a Local Service
+
+The same path flags work with `aha serv` to run your local weights as a persistent service:
+
+```bash
+# Safetensors
+aha serv -m qwen3-0.6b --weight-path D:\models\qwen3-0.6b -p 10000
+
+# GGUF
+aha serv -m qwen3-0.6b --artifact-format gguf --gguf-path D:\models\qwen3-0.6b-Q4_K_M.gguf --tokenizer-dir D:\models\tokenizer -p 10000
+
+# ONNX
+aha serv -m all-minilm-l6-v2 --artifact-format onnx --onnx-path D:\models\onnx --tokenizer-dir D:\models\tokenizer -p 10000
 ```
 
 ### Chat
@@ -126,9 +212,10 @@ curl http://localhost:10100/chat/completions \
 
 | Category | Models |
 |----------|--------|
-| **Text** | Qwen3, MiniCPM4, <br> LFM2-1.2B, LFM2.5-1.2B-Instruct |
-| **Vision** | Qwen2.5-VL, Qwen3-VL, Qwen3.5 |
-| **OCR** | DeepSeek-OCR, DeepSeek-OCR-2 , <br> , PaddleOCR-VL, PaddleOCR-VL1.5, <br> Hunyuan-OCR, GLM-OCR |
+| **Text** | Qwen3, MiniCPM4 |
+| **Embedding** | Qwen3-Embedding, all-MiniLM-L6-v2 |
+| **Vision** | Qwen2.5-VL, Qwen3-VL |
+| **OCR** | DeepSeek-OCR, Hunyuan-OCR, PaddleOCR-VL |
 | **ASR** | GLM-ASR-Nano, Fun-ASR-Nano, Qwen3-ASR |
 | **Audio** | VoxCPM, VoxCPM1.5 |
 | **Image** | RMBG-2.0 (background removal) |

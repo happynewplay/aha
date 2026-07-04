@@ -1,4 +1,7 @@
-use std::io::{Read, Seek};
+use std::{
+    fs::File,
+    io::{Read, Seek},
+};
 
 use ahash::AHashMap;
 use anyhow::{Result, anyhow};
@@ -12,9 +15,17 @@ use candle_core::{
 use candle_nn::{
     Activation, Conv1d, Conv1dConfig, LayerNorm, Linear, Module, RmsNorm, VarBuilder, linear_b,
 };
-use tokenizers::{self, AddedToken, Tokenizer, models::bpe::BPE};
+use tokenizers::{
+    self, AddedToken, Tokenizer, models::bpe::BPE, processors::template::TemplateProcessing,
+};
 
 use crate::tokenizer::TokenizerModel;
+
+pub struct GgufTextBootstrap {
+    pub tokenizer: TokenizerModel,
+    pub chat_template: Option<String>,
+    pub eos_token_id: Option<u32>,
+}
 
 pub struct Gguf<R: Read + Seek> {
     ct: gguf_file::Content,
@@ -23,6 +34,77 @@ pub struct Gguf<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> Gguf<R> {
+    fn configure_text_post_processor(
+        &self,
+        tokenizer: &mut Tokenizer,
+        vocab: &[String],
+    ) -> Result<()> {
+        let bos_token_id = self
+            .get_matedata("tokenizer.ggml.bos_token_id")
+            .ok()
+            .and_then(|value| value.to_u32().ok());
+        let eos_token_id = self
+            .get_matedata("tokenizer.ggml.eos_token_id")
+            .ok()
+            .and_then(|value| value.to_u32().ok());
+        // Some GGUF exports mark add_bos_token=false even when the source tokenizer's
+        // post-processor prepends BOS on encode(add_special_tokens=true). Prefer the
+        // observable tokenizer behavior and restore BOS whenever the metadata exposes one.
+        let add_bos_token = bos_token_id.is_some();
+        let add_eos_token = self
+            .get_matedata("tokenizer.ggml.add_eos_token")
+            .ok()
+            .and_then(|value| value.to_bool().ok())
+            .unwrap_or(false);
+
+        if !add_bos_token && !add_eos_token {
+            return Ok(());
+        }
+
+        let mut single = Vec::new();
+        let mut pair = Vec::new();
+        let mut special_tokens = Vec::new();
+
+        if add_bos_token
+            && let Some(id) = bos_token_id
+            && let Some(token) = vocab.get(id as usize)
+        {
+            single.push(token.clone());
+            pair.push(token.clone());
+            special_tokens.push((token.as_str(), id));
+        }
+
+        single.push("$A".to_string());
+        pair.push("$A".to_string());
+        pair.push("$B:1".to_string());
+
+        if add_eos_token
+            && let Some(id) = eos_token_id
+            && let Some(token) = vocab.get(id as usize)
+        {
+            single.push(token.clone());
+            pair.push(format!("{token}:1"));
+            if special_tokens.iter().all(|(_, token_id)| *token_id != id) {
+                special_tokens.push((token.as_str(), id));
+            }
+        }
+
+        if special_tokens.is_empty() {
+            return Ok(());
+        }
+
+        let processor = TemplateProcessing::builder()
+            .try_single(single.join(" "))
+            .map_err(|err| anyhow!("failed to build gguf single template: {err}"))?
+            .try_pair(pair.join(" "))
+            .map_err(|err| anyhow!("failed to build gguf pair template: {err}"))?
+            .special_tokens(special_tokens)
+            .build()
+            .map_err(|err| anyhow!("failed to build gguf post processor: {err}"))?;
+        tokenizer.with_post_processor(Some(processor));
+        Ok(())
+    }
+
     pub fn new(ct: gguf_file::Content, reader: R, device: Device) -> Self {
         Self { ct, reader, device }
     }
@@ -75,6 +157,10 @@ impl<R: Read + Seek> Gguf<R> {
 
     pub fn metadata(&self) -> &std::collections::HashMap<String, gguf_file::Value> {
         &self.ct.metadata
+    }
+
+    pub fn has_tensor(&self, name: &str) -> bool {
+        self.ct.tensor_infos.contains_key(name)
     }
 
     pub fn tensor(&mut self, name: &str) -> Result<QTensor> {
@@ -194,13 +280,43 @@ impl<R: Read + Seek> Gguf<R> {
                         add_tokens.push(add_token);
                     }
                 }
-                let _ = tokenizer.add_special_tokens(&add_tokens);
+                let _ = tokenizer.add_special_tokens(add_tokens);
+                self.configure_text_post_processor(&mut tokenizer, &vocab)?;
                 let tokenizer_model = TokenizerModel::new(tokenizer);
                 Ok(tokenizer_model)
             }
             _ => Err(anyhow!("Unsupported tokenizer model type: {model_type}")),
         }
     }
+}
+
+pub fn load_gguf_file(path: &str, device: &Device) -> Result<Gguf<File>> {
+    let mut reader = File::open(path)?;
+    let content = gguf_file::Content::read(&mut reader)?;
+    Ok(Gguf::new(content, reader, device.clone()))
+}
+
+pub fn load_text_bootstrap_from_gguf(
+    model_file: &str,
+    add_prefix_space: Option<bool>,
+    trim_offsets: Option<bool>,
+    use_regex: Option<bool>,
+) -> Result<GgufTextBootstrap> {
+    let gguf = load_gguf_file(model_file, &Device::Cpu)?;
+    let tokenizer = gguf.build_tokenizer(add_prefix_space, trim_offsets, use_regex)?;
+    let chat_template = gguf
+        .get_matedata("tokenizer.chat_template")
+        .ok()
+        .and_then(|value| value.to_string().ok().cloned());
+    let eos_token_id = gguf
+        .get_matedata("tokenizer.ggml.eos_token_id")
+        .ok()
+        .and_then(|value| value.to_u32().ok());
+    Ok(GgufTextBootstrap {
+        tokenizer,
+        chat_template,
+        eos_token_id,
+    })
 }
 
 #[derive(Debug, Clone)]

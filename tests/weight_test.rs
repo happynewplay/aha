@@ -265,25 +265,3 @@ fn deepseekocrv2_weight() -> Result<()> {
     println!("model_list: {:?}", model_list);
     Ok(())
 }
-
-#[test]
-fn lfm2_weight() -> Result<()> {
-    // cargo test -F cuda --test weight_test lfm2_weight -r -- --nocapture
-    let save_dir =
-        aha::utils::get_default_save_dir().ok_or(anyhow::anyhow!("Failed to get save dir"))?;
-    let model_path = format!("{}/LiquidAI/LFM2-1.2B/", save_dir);
-    let model_list = find_type_files(&model_path, "safetensors")?;
-
-    let device = Device::Cpu;
-    for m in &model_list {
-        let weights = safetensors::load(m, &device)?;
-        for (key, tensor) in weights.iter() {
-            // if key.contains("lm_head") {
-            //     println!("=== {} === {:?}", key, tensor.shape());
-            // }
-            println!("=== {} === {:?}", key, tensor.shape());
-        }
-    }
-    println!("model_list: {:?}", model_list);
-    Ok(())
-}

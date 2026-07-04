@@ -3,22 +3,26 @@
 //! This module provides model-specific exec implementations for the `run` subcommand.
 //! Each model has its own exec module that handles input/output parsing and model invocation.
 
+pub mod all_minilm_l6_v2;
 pub mod deepseek_ocr;
 pub mod fun_asr_nano;
 pub mod glm_asr_nano;
 pub mod glm_ocr;
 pub mod hunyuan_ocr;
-pub mod lfm2;
 pub mod minicpm4;
+pub mod minicpm5;
 pub mod paddleocr_vl;
 pub mod qwen2_5vl;
 pub mod qwen3;
 pub mod qwen3_5;
 pub mod qwen3_asr;
+pub mod qwen3_embedding;
+pub mod qwen3_reranker;
 pub mod qwen3vl;
 pub mod rmbg2_0;
 pub mod voxcpm;
 pub mod voxcpm1_5;
+pub mod yolo;
 
 use anyhow::Result;
 
