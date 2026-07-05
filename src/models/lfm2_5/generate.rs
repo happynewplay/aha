@@ -9,7 +9,10 @@ use rocket::futures::Stream;
 
 use crate::{
     chat_template::ChatTemplate,
-    models::{ArtifactKind, GenerateModel, LoadSpec, common::gguf::load_text_bootstrap_from_gguf},
+    models::{
+        ArtifactKind, GenerateModel, LoadSpec,
+        lfm2_5::{config::Lfm2_5Config, model::Lfm2_5Model},
+    },
     tokenizer::TokenizerModel,
     utils::{
         build_completion_chunk_response, build_completion_response, find_type_files, get_device,
@@ -17,48 +20,32 @@ use crate::{
     },
 };
 
-use super::{
-    config::MiniCPM5Config,
-    model::{MiniCPM5Model, resolve_minicpm5_gguf_file},
-};
+const LFM2_5_IM_END_TOKEN_ID: u32 = 7;
 
-pub struct MiniCPM5GenerateModel<'a> {
+pub struct Lfm2_5GenerateModel<'a> {
     chat_template: ChatTemplate<'a>,
     tokenizer: TokenizerModel,
-    model: MiniCPM5Model,
+    model: Lfm2_5Model,
     device: Device,
-    eos_token_ids: Vec<u32>,
+    eos_token_id: u32,
     model_name: String,
 }
 
-impl<'a> MiniCPM5GenerateModel<'a> {
+impl<'a> Lfm2_5GenerateModel<'a> {
     pub fn init_from_spec(
         spec: &LoadSpec,
         device: Option<&Device>,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        spec.validate()?;
         match spec.resolved_artifact() {
             ArtifactKind::Safetensors => {
-                let path =
-                    spec.paths.weight_dir.as_deref().ok_or_else(|| {
-                        anyhow!("weight_path is required for minicpm5 safetensors")
-                    })?;
+                let path = spec.paths.weight_dir.as_deref().ok_or_else(|| {
+                    anyhow!("weight_path is required for lfm2.5-350m safetensors")
+                })?;
                 Self::init(path, device, dtype)
             }
-            ArtifactKind::Gguf => {
-                let path = spec
-                    .paths
-                    .gguf_path
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("gguf_path is required for minicpm5 gguf"))?;
-                Self::init_from_gguf(path, device, dtype)
-            }
-            ArtifactKind::Onnx => Err(anyhow!(
-                "model {} does not support artifact {:?}",
-                spec.model.openai_model_id(),
-                ArtifactKind::Onnx
-            )),
+            ArtifactKind::Gguf => Err(anyhow!("lfm2.5-350m gguf runtime is not implemented yet")),
+            ArtifactKind::Onnx => Err(anyhow!("lfm2.5-350m onnx runtime is not implemented yet")),
             ArtifactKind::Auto => unreachable!("artifact kind should be resolved before init"),
         }
     }
@@ -67,56 +54,28 @@ impl<'a> MiniCPM5GenerateModel<'a> {
         let chat_template = ChatTemplate::init(path)?;
         let tokenizer = TokenizerModel::init(path)?;
         let config_path = path.to_string() + "/config.json";
-        let cfg: MiniCPM5Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
+        let cfg: Lfm2_5Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
         let device = get_device(device);
-        let dtype = get_dtype(dtype, cfg.torch_dtype.as_str());
+        let dtype = get_dtype(dtype, cfg.dtype.as_str());
         let model_list = find_type_files(path, "safetensors")?;
+        if model_list.is_empty() {
+            return Err(anyhow!("no safetensors files found in {path}"));
+        }
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_list, dtype, &device)? };
-        let model = MiniCPM5Model::new_from_vb(vb, &cfg)?;
+        let model = Lfm2_5Model::new_from_vb(vb, &cfg)?;
+
         Ok(Self {
             chat_template,
             tokenizer,
             model,
             device,
-            eos_token_ids: normalize_eos_token_ids(cfg.eos_token_id.clone()),
-            model_name: "minicpm5-1b".to_string(),
-        })
-    }
-
-    pub fn init_from_gguf(
-        model_file: &str,
-        device: Option<&Device>,
-        dtype: Option<DType>,
-    ) -> Result<Self> {
-        let model_file = resolve_minicpm5_gguf_file(model_file)?;
-        let device = get_device(device);
-        let dtype = dtype.unwrap_or(DType::F16);
-        let bootstrap =
-            load_text_bootstrap_from_gguf(&model_file, Some(false), Some(false), Some(false))?;
-        let chat_template = bootstrap.chat_template.ok_or_else(|| {
-            anyhow!("tokenizer.chat_template metadata is missing in {model_file}")
-        })?;
-        let tokenizer = bootstrap.tokenizer;
-        let model = MiniCPM5Model::new_from_gguf(&model_file, &device, dtype)?;
-        let mut eos_token_ids = vec![1, 130073];
-        if let Some(eos) = bootstrap.eos_token_id
-            && !eos_token_ids.contains(&eos)
-        {
-            eos_token_ids.push(eos);
-        }
-
-        Ok(Self {
-            chat_template: ChatTemplate::str_init(&chat_template)?,
-            tokenizer,
-            model,
-            device,
-            eos_token_ids,
-            model_name: "minicpm5-1b".to_string(),
+            eos_token_id: cfg.eos_token_id,
+            model_name: "lfm2.5-350m".to_string(),
         })
     }
 }
 
-impl<'a> GenerateModel for MiniCPM5GenerateModel<'a> {
+impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
     fn generate(&mut self, mes: ChatCompletionParameters) -> Result<ChatCompletionResponse> {
         let seed = mes.seed.unwrap_or(34562) as u64;
         let mut logit_processor = get_logit_processor(mes.temperature, mes.top_p, None, seed);
@@ -133,7 +92,7 @@ impl<'a> GenerateModel for MiniCPM5GenerateModel<'a> {
             let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
             let next_token = logit_processor.sample(&logits)?;
             generate.push(next_token);
-            if self.eos_token_ids.contains(&next_token) {
+            if next_token == self.eos_token_id {
                 break;
             }
             seqlen_offset += seq_len;
@@ -142,11 +101,14 @@ impl<'a> GenerateModel for MiniCPM5GenerateModel<'a> {
         }
 
         let num_token = generate.len() as u32;
-        let res = self.tokenizer.token_decode(generate)?;
-        self.model.clear_kv_cache();
-        let response =
-            build_completion_response(res, &self.model_name, Some(num_token), Some(prompt_tokens));
-        Ok(response)
+        let res = decode_tokens_for_completion(&self.tokenizer, &generate, self.eos_token_id)?;
+        self.model.clear_cache();
+        Ok(build_completion_response(
+            res,
+            &self.model_name,
+            Some(num_token),
+            Some(prompt_tokens),
+        ))
     }
 
     fn generate_stream(
@@ -167,26 +129,29 @@ impl<'a> GenerateModel for MiniCPM5GenerateModel<'a> {
         let mut seq_len = input_ids.dim(1)?;
         let mut seqlen_offset = 0;
         let sample_len = mes.max_tokens.unwrap_or(512);
-        let eos_token_ids = self.eos_token_ids.clone();
         let model_name = self.model_name.clone();
         let tokenizer = &self.tokenizer;
         let device = self.device.clone();
+        let eos_token_id = self.eos_token_id;
         let model = &mut self.model;
 
         let stream = stream! {
             let mut error_tokens = Vec::new();
-            let mut stream_state = MiniCPM5StreamState::default();
+            let mut stream_state = Lfm2_5StreamState::default();
             for _ in 0..sample_len {
                 let logits = model.forward(&input_ids, seqlen_offset)?;
                 let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
                 let next_token = logit_processor.sample(&logits)?;
+                if eos_token_id == LFM2_5_IM_END_TOKEN_ID && next_token == eos_token_id {
+                    break;
+                }
                 let mut decode_ids = Vec::new();
                 if !error_tokens.is_empty() {
                     decode_ids.extend_from_slice(&error_tokens);
                 }
                 decode_ids.push(next_token);
                 let decoded_token = tokenizer
-                    .token_decode(decode_ids)
+                    .token_decode_with_special_tokens(decode_ids)
                     .map_err(|e| anyhow!(format!("stream decode error{e}")))?;
                 if decoded_token.contains('�') {
                     error_tokens.push(next_token);
@@ -202,38 +167,38 @@ impl<'a> GenerateModel for MiniCPM5GenerateModel<'a> {
                 if let Some(chunk) = stream_state.push(&decoded_token, &model_name)? {
                     yield Ok(chunk);
                 }
-                if eos_token_ids.contains(&next_token) {
-                    break;
-                }
                 seqlen_offset += seq_len;
                 seq_len = 1;
                 input_ids = Tensor::from_vec(vec![next_token], (1, 1), &device)?;
+                if next_token == eos_token_id {
+                    break;
+                }
             }
-            model.clear_kv_cache();
+            model.clear_cache();
         };
         Ok(Box::new(Box::pin(stream)))
     }
 }
 
 #[derive(Default)]
-struct MiniCPM5StreamState {
+struct Lfm2_5StreamState {
     tool_call_id: Option<String>,
     tool_call_content: String,
 }
 
-impl MiniCPM5StreamState {
+impl Lfm2_5StreamState {
     fn push(
         &mut self,
         decoded_token: &str,
         model_name: &str,
     ) -> Result<Option<ChatCompletionChunkResponse>> {
         match decoded_token {
-            "<tool_call>" => {
+            "<|tool_call_start|>" | "<tool_call>" => {
                 self.tool_call_id = Some(uuid::Uuid::new_v4().to_string());
                 self.tool_call_content.clear();
                 Ok(None)
             }
-            "</tool_call>" => {
+            "<|tool_call_end|>" | "</tool_call>" => {
                 let chunk = build_completion_chunk_response(
                     decoded_token.to_string(),
                     model_name,
@@ -258,41 +223,95 @@ impl MiniCPM5StreamState {
     }
 }
 
-fn normalize_eos_token_ids(mut eos_token_ids: Vec<u32>) -> Vec<u32> {
-    for token in [1_u32, 130073_u32] {
-        if !eos_token_ids.contains(&token) {
-            eos_token_ids.push(token);
-        }
+trait Lfm2_5TokenDecoder {
+    fn decode_with_special_tokens(&self, tokens: Vec<u32>) -> Result<String>;
+}
+
+impl Lfm2_5TokenDecoder for TokenizerModel {
+    fn decode_with_special_tokens(&self, tokens: Vec<u32>) -> Result<String> {
+        self.token_decode_with_special_tokens(tokens)
     }
-    eos_token_ids
+}
+
+fn decode_tokens_for_completion<T: Lfm2_5TokenDecoder>(
+    tokenizer: &T,
+    tokens: &[u32],
+    eos_token_id: u32,
+) -> Result<String> {
+    let filtered_tokens = if eos_token_id == LFM2_5_IM_END_TOKEN_ID {
+        tokens
+            .iter()
+            .copied()
+            .filter(|token| *token != eos_token_id)
+            .collect::<Vec<u32>>()
+    } else {
+        tokens.to_vec()
+    };
+    tokenizer.decode_with_special_tokens(filtered_tokens)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::MiniCPM5StreamState;
+    use super::{Lfm2_5StreamState, decode_tokens_for_completion};
     use anyhow::Result;
+    use std::{cell::RefCell, collections::VecDeque};
+
+    struct MockTokenizer {
+        decode_map: RefCell<VecDeque<(Vec<u32>, String)>>,
+    }
+
+    impl MockTokenizer {
+        fn new(entries: Vec<(Vec<u32>, &str)>) -> Self {
+            Self {
+                decode_map: RefCell::new(
+                    entries
+                        .into_iter()
+                        .map(|(tokens, output)| (tokens, output.to_string()))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl super::Lfm2_5TokenDecoder for MockTokenizer {
+        fn decode_with_special_tokens(&self, tokens: Vec<u32>) -> Result<String> {
+            let (expected, output) = self
+                .decode_map
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected decode call in test");
+            assert_eq!(tokens, expected);
+            Ok(output)
+        }
+    }
 
     #[test]
-    fn minicpm5_stream_state_buffers_tool_call_until_closing_tag() -> Result<()> {
-        let mut state = MiniCPM5StreamState::default();
+    fn lfm2_5_filters_im_end_before_decode() -> Result<()> {
+        let mut tokenizer = MockTokenizer::new(vec![(vec![11, 12], "decoded")]);
+        let res = decode_tokens_for_completion(&mut tokenizer, &[11, 7, 12], 7)?;
+        assert_eq!(res, "decoded");
+        Ok(())
+    }
 
-        assert!(state.push("hello", "minicpm5-1b")?.is_some());
-        assert!(state.push("<tool_call>", "minicpm5-1b")?.is_none());
+    #[test]
+    fn lfm2_5_stream_state_emits_openai_tool_calls_on_closing_tag() -> Result<()> {
+        let mut state = Lfm2_5StreamState::default();
+        assert!(state.push("<|tool_call_start|>", "lfm2.5-350m")?.is_none());
         assert!(
             state
                 .push(
                     r#"{"name":"lookup","arguments":{"query":"rust"}}"#,
-                    "minicpm5-1b"
+                    "lfm2.5-350m"
                 )?
                 .is_none()
         );
 
         let chunk = state
-            .push("</tool_call>", "minicpm5-1b")?
+            .push("<|tool_call_end|>", "lfm2.5-350m")?
             .expect("expected chunk on closing tag");
         let payload = serde_json::to_string(&chunk)?;
-        assert!(payload.contains("lookup"));
         assert!(payload.contains("tool_calls"));
+        assert!(payload.contains("lookup"));
         Ok(())
     }
 }

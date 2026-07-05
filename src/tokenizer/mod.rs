@@ -110,6 +110,14 @@ impl TokenizerModel {
             .map_err(|e| anyhow!(format!("tokenizer encode error{}", e)))?;
         Ok(decode)
     }
+
+    pub fn token_decode_with_special_tokens(&self, tokens: Vec<u32>) -> Result<String> {
+        let decode = self
+            .tokenizer
+            .decode(&tokens, false)
+            .map_err(|e| anyhow!(format!("tokenizer decode error: {}", e)))?;
+        Ok(decode)
+    }
 }
 
 pub fn sentencepiece_encode(

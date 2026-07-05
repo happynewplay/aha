@@ -31,6 +31,96 @@ fn load_spec_minicpm5_auto_resolves_to_safetensors_default() {
 }
 
 #[test]
+fn load_spec_lfm2_5_auto_resolves_to_safetensors_default() {
+    let spec = LoadSpec {
+        model: WhichModel::LFM2_5_350M,
+        artifact: ArtifactKind::Auto,
+        paths: ModelPaths {
+            weight_dir: Some("D:/model_download/LFM2.5-350M".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert_eq!(spec.resolved_artifact(), ArtifactKind::Safetensors);
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_lfm2_5_embedding_auto_resolves_to_safetensors_default() {
+    let spec = LoadSpec {
+        model: WhichModel::LFM2_5Embedding350M,
+        artifact: ArtifactKind::Auto,
+        paths: ModelPaths {
+            weight_dir: Some("D:/model_download/LFM2.5-Embedding-350M".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert_eq!(spec.resolved_artifact(), ArtifactKind::Safetensors);
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_lfm2_5_accepts_gguf() {
+    let spec = LoadSpec {
+        model: WhichModel::LFM2_5_350M,
+        artifact: ArtifactKind::Gguf,
+        paths: ModelPaths {
+            gguf_path: Some(
+                "D:/model_download/LFM2.5-350M-GGUF/LFM2.5-350M-Q4_K_M.gguf".to_string(),
+            ),
+            ..Default::default()
+        },
+    };
+
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_lfm2_5_accepts_onnx() {
+    let spec = LoadSpec {
+        model: WhichModel::LFM2_5_350M,
+        artifact: ArtifactKind::Onnx,
+        paths: ModelPaths {
+            onnx_path: Some("D:/model_download/LFM2.5-350M-ONNX".to_string()),
+            tokenizer_dir: Some("D:/model_download/LFM2.5-350M".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_lfm2_5_embedding_accepts_safetensors() {
+    let spec = LoadSpec {
+        model: WhichModel::LFM2_5Embedding350M,
+        artifact: ArtifactKind::Safetensors,
+        paths: ModelPaths {
+            weight_dir: Some("D:/model_download/LFM2.5-Embedding-350M".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_lfm2_5_embedding_rejects_onnx() {
+    let spec = LoadSpec {
+        model: WhichModel::LFM2_5Embedding350M,
+        artifact: ArtifactKind::Onnx,
+        paths: ModelPaths {
+            onnx_path: Some("D:/tmp/LFM2.5-Embedding-350M.onnx".to_string()),
+            ..Default::default()
+        },
+    };
+
+    let err = spec.validate().unwrap_err().to_string();
+    assert!(err.contains("does not support artifact"));
+}
+
+#[test]
 fn load_spec_all_minilm_accepts_onnx() {
     let spec = LoadSpec {
         model: WhichModel::AllMiniLML6V2,

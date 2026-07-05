@@ -445,7 +445,7 @@ aha -m qwen3vl-2b -a 0.0.0.0 -p 8080
 ### Embeddings 接口
 - **端点**: `POST /embeddings` 或 `POST /v1/embeddings`
 - **功能**: 文本向量生成
-- **支持模型**: Qwen3-Embedding 系列
+- **支持模型**: Qwen3-Embedding 系列、LFM2.5-Embedding-350M、all-MiniLM-L6-v2
 - **格式**: OpenAI embeddings 格式
 - **流式支持**: 不支持
 

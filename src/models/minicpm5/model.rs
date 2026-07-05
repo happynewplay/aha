@@ -29,7 +29,10 @@ pub(super) fn resolve_minicpm5_gguf_file(path: &str) -> Result<String> {
         {
             return Ok(model_path.to_string_lossy().to_string());
         }
-        return Err(anyhow!("gguf model path does not point to a .gguf file: {}", path));
+        return Err(anyhow!(
+            "gguf model path does not point to a .gguf file: {}",
+            path
+        ));
     }
 
     let mut stack = vec![model_path.to_path_buf()];
@@ -103,16 +106,11 @@ impl MiniCPM5Model {
         let vocab_size = required_u32(&gguf, &format!("{arch}.vocab_size"))?;
         let hidden_size = required_u32(&gguf, &format!("{arch}.embedding_length"))?;
         let intermediate_size = required_u32(&gguf, &format!("{arch}.feed_forward_length"))?;
-        let rms_norm_eps = required_f32(&gguf, &format!("{arch}.attention.layer_norm_rms_epsilon"))?
-            as f64;
+        let rms_norm_eps =
+            required_f32(&gguf, &format!("{arch}.attention.layer_norm_rms_epsilon"))? as f64;
         let rope_theta = required_f32(&gguf, &format!("{arch}.rope.freq_base"))?;
 
-        let tensors = load_llama_gguf_tensors(
-            &mut gguf,
-            block_count,
-            device,
-            dtype,
-        )?;
+        let tensors = load_llama_gguf_tensors(&mut gguf, block_count, device, dtype)?;
         let vb = VarBuilder::from_tensors(tensors, dtype, device);
         let model = LlamaForCausalLM::new(
             vb,

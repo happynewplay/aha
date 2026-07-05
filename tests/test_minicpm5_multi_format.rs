@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 use aha::chat_template::ChatTemplate;
 use aha::models::{
     ArtifactKind, GenerateModel, LoadSpec, ModelPaths, WhichModel,
-    common::gguf::load_text_bootstrap_from_gguf,
-    minicpm5::generate::MiniCPM5GenerateModel,
+    common::gguf::load_text_bootstrap_from_gguf, minicpm5::generate::MiniCPM5GenerateModel,
 };
 use aha::tokenizer::TokenizerModel;
 use aha_openai_dive::v1::resources::chat::ChatCompletionParameters;
@@ -53,7 +52,10 @@ fn first_file_with_extension_recursive(dir: &str, extension: &str) -> Result<Opt
 }
 
 fn resolve_safetensors_dir() -> Option<String> {
-    let path = env_or_default("AHA_MINICPM5_SAFETENSORS_DIR", DEFAULT_MINICPM5_SAFETENSORS_DIR);
+    let path = env_or_default(
+        "AHA_MINICPM5_SAFETENSORS_DIR",
+        DEFAULT_MINICPM5_SAFETENSORS_DIR,
+    );
     if existing_dir(&path) {
         return Some(path);
     }
@@ -110,9 +112,7 @@ fn response_content_text(response: &serde_json::Value) -> String {
 #[test]
 fn minicpm5_safetensors_init_from_spec_can_generate() -> Result<()> {
     let Some(weight_dir) = resolve_safetensors_dir() else {
-        println!(
-            "skip safetensors test: dir not found, set AHA_MINICPM5_SAFETENSORS_DIR to run"
-        );
+        println!("skip safetensors test: dir not found, set AHA_MINICPM5_SAFETENSORS_DIR to run");
         return Ok(());
     };
 
@@ -139,7 +139,9 @@ fn minicpm5_safetensors_init_from_spec_can_generate() -> Result<()> {
 #[test]
 fn minicpm5_gguf_init_from_spec_can_generate() -> Result<()> {
     let Some(gguf_path) = resolve_gguf_path()? else {
-        println!("skip gguf test: no gguf file found, set AHA_MINICPM5_GGUF_PATH to run explicitly");
+        println!(
+            "skip gguf test: no gguf file found, set AHA_MINICPM5_GGUF_PATH to run explicitly"
+        );
         return Ok(());
     };
 
@@ -205,16 +207,13 @@ fn minicpm5_gguf_bootstrap_matches_safetensors_prompt_and_tokens() -> Result<()>
     let safetensors_template = ChatTemplate::init(&weight_dir)?;
     let safetensors_prompt = safetensors_template.apply_chat_template(&request)?;
     let safetensors_tokenizer = TokenizerModel::init(&weight_dir)?;
-    let safetensors_ids = safetensors_tokenizer.text_encode_vec(safetensors_prompt.clone(), true)?;
+    let safetensors_ids =
+        safetensors_tokenizer.text_encode_vec(safetensors_prompt.clone(), true)?;
 
     let gguf_bootstrap =
         load_text_bootstrap_from_gguf(&gguf_path, Some(false), Some(false), Some(false))?;
-    let gguf_template = ChatTemplate::str_init(
-        gguf_bootstrap
-            .chat_template
-            .as_deref()
-            .unwrap_or_default(),
-    )?;
+    let gguf_template =
+        ChatTemplate::str_init(gguf_bootstrap.chat_template.as_deref().unwrap_or_default())?;
     let gguf_prompt = gguf_template.apply_chat_template(&request)?;
     let gguf_ids = gguf_bootstrap
         .tokenizer

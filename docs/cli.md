@@ -445,7 +445,7 @@ After the service starts, the following API endpoints are available:
 ### Embeddings Endpoint
 - **Endpoint**: `POST /embeddings` or `POST /v1/embeddings`
 - **Function**: Text embedding generation
-- **Supported Models**: Qwen3-Embedding family
+- **Supported Models**: Qwen3-Embedding family, LFM2.5-Embedding-350M, all-MiniLM-L6-v2
 - **Format**: OpenAI embeddings format
 - **Streaming Support**: No
 

@@ -213,7 +213,7 @@ curl http://localhost:10100/chat/completions \
 | Category | Models |
 |----------|--------|
 | **Text** | Qwen3, MiniCPM4 |
-| **Embedding** | Qwen3-Embedding, all-MiniLM-L6-v2 |
+| **Embedding** | Qwen3-Embedding, LFM2.5-Embedding-350M, all-MiniLM-L6-v2 |
 | **Vision** | Qwen2.5-VL, Qwen3-VL |
 | **OCR** | DeepSeek-OCR, Hunyuan-OCR, PaddleOCR-VL |
 | **ASR** | GLM-ASR-Nano, Fun-ASR-Nano, Qwen3-ASR |

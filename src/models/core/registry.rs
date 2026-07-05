@@ -2,8 +2,9 @@ use anyhow::Result;
 
 use crate::models::{
     ModelInstance, WhichModel, all_minilm_l6_v2::generate::AllMiniLML6V2Model,
-    glm_ocr::generate::GlmOcrGenerateModel, load_model_legacy, qwen3::generate::Qwen3GenerateModel,
-    minicpm5::generate::MiniCPM5GenerateModel,
+    glm_ocr::generate::GlmOcrGenerateModel, lfm2_5::generate::Lfm2_5GenerateModel,
+    lfm2_5_embedding::generate::Lfm2_5EmbeddingModel, load_model_legacy,
+    minicpm5::generate::MiniCPM5GenerateModel, qwen3::generate::Qwen3GenerateModel,
     qwen3_5::generate::Qwen3_5GenerateModel, qwen3_embedding::generate::Qwen3EmbeddingModel,
     qwen3_reranker::generate::Qwen3RerankerModel, yolo::generate::YoloGenerateModel,
 };
@@ -14,11 +15,13 @@ use super::artifact::LoadSpec;
 enum ModelLoaderFamily {
     AllMiniLML6V2,
     MiniCPM5,
+    LFM2_5,
     GlmOCR,
     Qwen3,
     Qwen3Embedding,
     Qwen3Reranker,
     Qwen3_5,
+    LFM2_5Embedding,
     Yolo,
     Legacy,
 }
@@ -27,6 +30,8 @@ fn resolve_model_loader_family(model: WhichModel) -> ModelLoaderFamily {
     match model {
         WhichModel::AllMiniLML6V2 => ModelLoaderFamily::AllMiniLML6V2,
         WhichModel::MiniCPM5_1B => ModelLoaderFamily::MiniCPM5,
+        WhichModel::LFM2_5_350M => ModelLoaderFamily::LFM2_5,
+        WhichModel::LFM2_5Embedding350M => ModelLoaderFamily::LFM2_5Embedding,
         WhichModel::GlmOCR => ModelLoaderFamily::GlmOCR,
         WhichModel::Qwen3_0_6B => ModelLoaderFamily::Qwen3,
         WhichModel::Qwen3Embedding0_6B
@@ -59,6 +64,12 @@ pub fn load_model_from_spec<'a>(spec: &LoadSpec) -> Result<ModelInstance<'a>> {
         }
         ModelLoaderFamily::MiniCPM5 => {
             ModelInstance::MiniCPM5(MiniCPM5GenerateModel::init_from_spec(spec, None, None)?)
+        }
+        ModelLoaderFamily::LFM2_5 => {
+            ModelInstance::LFM2_5(Lfm2_5GenerateModel::init_from_spec(spec, None, None)?)
+        }
+        ModelLoaderFamily::LFM2_5Embedding => {
+            ModelInstance::LFM2_5Embedding(Lfm2_5EmbeddingModel::init_from_spec(spec, None, None)?)
         }
         ModelLoaderFamily::GlmOCR => {
             ModelInstance::GlmOCR(GlmOcrGenerateModel::init_from_spec(spec, None, None)?)
@@ -126,6 +137,22 @@ mod tests {
         assert_eq!(
             resolve_model_loader_family(WhichModel::MiniCPM5_1B),
             ModelLoaderFamily::MiniCPM5
+        );
+        assert_eq!(
+            resolve_model_loader_family(WhichModel::LFM2_5_350M),
+            ModelLoaderFamily::LFM2_5
+        );
+        assert_eq!(
+            resolve_model_loader_family(WhichModel::LFM2_5Embedding350M),
+            ModelLoaderFamily::LFM2_5Embedding
+        );
+    }
+
+    #[test]
+    fn registry_routes_lfm2_5_to_family_loader() {
+        assert_eq!(
+            resolve_model_loader_family(WhichModel::LFM2_5_350M),
+            ModelLoaderFamily::LFM2_5
         );
     }
 

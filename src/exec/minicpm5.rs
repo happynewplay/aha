@@ -1,10 +1,10 @@
 //! MiniCPM5-1B exec implementation for CLI `run` subcommand
 
-use std::time::Instant;
 use std::path::Path;
+use std::time::Instant;
 
-use anyhow::{Result, anyhow};
 use aha_openai_dive::v1::resources::chat::ChatCompletionParameters;
+use anyhow::{Result, anyhow};
 
 use crate::exec::ExecModel;
 use crate::models::{
@@ -16,9 +16,9 @@ pub struct MiniCPM5Exec;
 
 impl MiniCPM5Exec {
     fn build_text_request(input: &[String]) -> Result<ChatCompletionParameters> {
-        let input_text = input
-            .first()
-            .ok_or_else(|| anyhow!("minicpm5 run requires one text input unless --request-json is provided"))?;
+        let input_text = input.first().ok_or_else(|| {
+            anyhow!("minicpm5 run requires one text input unless --request-json is provided")
+        })?;
         let target_text = if input_text.starts_with("file://") {
             let path = get_file_path(input_text)?;
             std::fs::read_to_string(path)?
@@ -108,8 +108,8 @@ impl ExecModel for MiniCPM5Exec {
 #[cfg(test)]
 mod tests {
     use super::MiniCPM5Exec;
-    use anyhow::Result;
     use aha_openai_dive::v1::resources::chat::ChatCompletionParameters;
+    use anyhow::Result;
 
     fn build_request_json_payload() -> serde_json::Value {
         serde_json::json!({
@@ -148,16 +148,16 @@ mod tests {
             "aha_minicpm5_request_{}.json",
             uuid::Uuid::new_v4()
         ));
-        std::fs::write(&request_path, serde_json::to_string(&build_request_json_payload())?)?;
+        std::fs::write(
+            &request_path,
+            serde_json::to_string(&build_request_json_payload())?,
+        )?;
 
         let request = MiniCPM5Exec::build_request(&[], request_path.to_str())?;
         let value = serde_json::to_value(request)?;
         assert_eq!(value["model"], "minicpm5-1b");
         assert!(value["tools"].is_array());
-        assert_eq!(
-            value["tools"].as_array().map(|tools| tools.len()),
-            Some(1)
-        );
+        assert_eq!(value["tools"].as_array().map(|tools| tools.len()), Some(1));
 
         std::fs::remove_file(&request_path)?;
         Ok(())

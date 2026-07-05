@@ -9,6 +9,8 @@ pub mod fun_asr_nano;
 pub mod glm_asr_nano;
 pub mod glm_ocr;
 pub mod hunyuan_ocr;
+pub mod lfm2_5;
+pub mod lfm2_5_embedding;
 pub mod minicpm4;
 pub mod minicpm5;
 pub mod paddleocr_vl;

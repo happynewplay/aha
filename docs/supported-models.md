@@ -7,6 +7,7 @@ aha supports a growing collection of state-of-the-art AI models across multiple 
 | Model | Parameters | Description | Use Case | License |
 |-------|-----------|-------------|----------|---------|
 | **Qwen3-0.6B** | 0.6B | Latest generation (safetensors / gguf / onnx) | Advanced reasoning | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **LFM2.5-350M** | 0.35B | Hybrid edge LLM (safetensors runtime, gguf / onnx planned) | On-device tool use | [lfm1.0](https://huggingface.co/LiquidAI/LFM2.5-350M/blob/main/LICENSE) |
 | **MiniCPM4-0.5B** | 0.5B | Efficient lightweight | Edge deployment | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 
 ## Embedding
@@ -16,6 +17,7 @@ aha supports a growing collection of state-of-the-art AI models across multiple 
 | **Qwen3-Embedding-0.6B** | 0.6B | Text embedding (safetensors / gguf / onnx) | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **Qwen3-Embedding-4B** | 4B | Text embedding (safetensors / gguf / onnx) | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **Qwen3-Embedding-8B** | 8B | Text embedding (safetensors / gguf / onnx) | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **LFM2.5-Embedding-350M** | 0.35B | Text embedding (safetensors only, query/document prompts, cosine similarity) | [lfm1.0](https://huggingface.co/LiquidAI/LFM2.5-350M/blob/main/LICENSE) |
 | **all-MiniLM-L6-v2** | 22M | Sentence-transformers embedding (safetensors / gguf / onnx) | [Apache 2.0](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/blob/main/LICENSE) |
 
 ## Reranker

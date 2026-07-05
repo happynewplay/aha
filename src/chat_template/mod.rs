@@ -129,9 +129,12 @@ pub struct ChatTemplate<'a> {
 
 impl<'a> ChatTemplate<'a> {
     fn setup_environment(env: &mut Environment<'a>) {
-        env.add_filter("tojson", |v: MiniJinjaValue, _ensure_ascii: Option<MiniJinjaValue>| {
-            serde_json::to_string(&v).unwrap()
-        });
+        env.add_filter(
+            "tojson",
+            |v: MiniJinjaValue, _ensure_ascii: Option<MiniJinjaValue>| {
+                serde_json::to_string(&v).unwrap()
+            },
+        );
 
         env.add_filter("fromjson", |v: MiniJinjaValue| {
             if let Some(raw_json) = v.as_str() {
@@ -208,8 +211,8 @@ impl<'a> ChatTemplate<'a> {
 #[cfg(test)]
 mod tests {
     use super::ChatTemplate;
-    use anyhow::Result;
     use aha_openai_dive::v1::resources::chat::ChatCompletionParameters;
+    use anyhow::Result;
 
     #[test]
     fn minicpm5_tool_template_renders_tojson_with_ensure_ascii_kwarg() -> Result<()> {

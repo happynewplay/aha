@@ -7,6 +7,7 @@ aha 支持多个领域的最先进 AI 模型集合。
 | 模型 | 参数量 | 描述 | 使用场景 | 开源协议 |
 |------|--------|------|----------|---------|
 | **Qwen3-0.6B** | 0.6B | 最新一代（safetensors / gguf / onnx） | 高级推理 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **LFM2.5-350M** | 0.35B | 混合架构边缘模型（当前支持 safetensors，gguf / onnx 预留） | 端侧工具调用 | [lfm1.0](https://huggingface.co/LiquidAI/LFM2.5-350M/blob/main/LICENSE) |
 | **MiniCPM4-0.5B** | 0.5B | 高效轻量级 | 边缘部署 | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 
 ## Embedding
@@ -16,6 +17,7 @@ aha 支持多个领域的最先进 AI 模型集合。
 | **Qwen3-Embedding-0.6B** | 0.6B | 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **Qwen3-Embedding-4B** | 4B | 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
 | **Qwen3-Embedding-8B** | 8B | 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
+| **LFM2.5-Embedding-350M** | 0.35B | 文本向量（仅 safetensors，query/document 前缀，cosine 相似度） | [lfm1.0](https://huggingface.co/LiquidAI/LFM2.5-350M/blob/main/LICENSE) |
 | **all-MiniLM-L6-v2** | 22M | sentence-transformers 文本向量（safetensors / gguf / onnx） | [Apache 2.0](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/blob/main/LICENSE) |
 
 ## Reranker

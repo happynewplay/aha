@@ -28,6 +28,7 @@ use candle_transformers::generation::{LogitsProcessor, Sampling};
 use dirs::home_dir;
 use half::{bf16, f16, slice::HalfFloatSliceExt};
 use modelscope::ModelScope;
+use serde_json::{Map, Value};
 use tokio::time::sleep;
 use zip::ZipArchive;
 
@@ -506,40 +507,9 @@ pub fn build_completion_response(
         object: "chat.completion".to_string(),
         usage,
     };
-    let choice = if res.contains("<tool_call>") {
-        let mes: Vec<&str> = res.split("<tool_call>").collect();
-        let content = mes[0].to_string();
-        let mut tool_vec = Vec::new();
-        for (i, m) in mes.iter().enumerate().skip(1) {
-            let tool_mes = m.replace("</tool_call>", "");
-            let function = match serde_json::from_str::<serde_json::Value>(&tool_mes) {
-                Ok(json_value) => {
-                    let name = json_value
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-
-                    let arguments = json_value
-                        .get("arguments")
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
-
-                    Function { name, arguments }
-                }
-                Err(_) => Function {
-                    name: "".to_string(),
-                    arguments: "".to_string(),
-                },
-            };
-            let tool_call = ToolCall {
-                id: (i - 1).to_string(),
-                r#type: "function".to_string(),
-                function,
-            };
-            tool_vec.push(tool_call);
-        }
-        ChatCompletionChoice {
+    let res = normalize_tool_call_tags(&res);
+    let choice = match parse_tool_call_blocks(&res) {
+        Ok((content, tool_vec)) if !tool_vec.is_empty() => ChatCompletionChoice {
             index: 0,
             message: ChatMessage::Assistant {
                 content: Some(ChatMessageContent::Text(content)),
@@ -551,12 +521,11 @@ pub fn build_completion_response(
             },
             finish_reason: Some(FinishReason::ToolCalls),
             logprobs: None,
-        }
-    } else {
-        ChatCompletionChoice {
+        },
+        _ => ChatCompletionChoice {
             index: 0,
             message: ChatMessage::Assistant {
-                content: Some(ChatMessageContent::Text(res)),
+                content: Some(ChatMessageContent::Text(strip_tool_call_tags(&res))),
                 reasoning_content: None,
                 refusal: None,
                 name: None,
@@ -565,10 +534,320 @@ pub fn build_completion_response(
             },
             finish_reason: Some(FinishReason::StopSequenceReached),
             logprobs: None,
-        }
+        },
     };
     response.choices.push(choice);
     response
+}
+
+fn normalize_tool_call_tags(res: &str) -> String {
+    res.replace("<|tool_call_start|>", "<tool_call>")
+        .replace("<|tool_call_end|>", "</tool_call>")
+}
+
+fn strip_tool_call_tags(res: &str) -> String {
+    res.replace("<tool_call>", "").replace("</tool_call>", "")
+}
+
+fn parse_tool_call_functions(tool_mes: &str) -> Result<Vec<Function>> {
+    let trimmed = tool_mes.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("tool call payload is empty"));
+    }
+
+    if let Ok(json_value) = serde_json::from_str::<Value>(trimmed) {
+        return parse_json_tool_call_payload(json_value);
+    }
+
+    parse_pythonic_tool_call_payload(trimmed)
+}
+
+fn parse_json_tool_call_payload(json_value: Value) -> Result<Vec<Function>> {
+    match json_value {
+        Value::Array(items) => items
+            .into_iter()
+            .map(parse_single_json_tool_call_payload)
+            .collect(),
+        value => Ok(vec![parse_single_json_tool_call_payload(value)?]),
+    }
+}
+
+fn parse_single_json_tool_call_payload(json_value: Value) -> Result<Function> {
+    let payload = json_value.get("function").cloned().unwrap_or(json_value);
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tool call payload is missing function name"))?
+        .to_string();
+    let arguments = match payload.get("arguments") {
+        None => String::new(),
+        Some(value) if value.is_string() => value.as_str().unwrap_or_default().to_string(),
+        Some(value) => value.to_string(),
+    };
+    Ok(Function { name, arguments })
+}
+
+fn parse_pythonic_tool_call_payload(tool_mes: &str) -> Result<Vec<Function>> {
+    let inner = if tool_mes.starts_with('[') && tool_mes.ends_with(']') && tool_mes.len() >= 2 {
+        &tool_mes[1..tool_mes.len() - 1]
+    } else {
+        tool_mes
+    };
+    let call_exprs = split_top_level_items(inner)?;
+    if call_exprs.is_empty() {
+        return Err(anyhow!("tool call payload is empty"));
+    }
+
+    call_exprs
+        .into_iter()
+        .map(|expr| parse_pythonic_tool_call_expr(&expr))
+        .collect()
+}
+
+fn parse_pythonic_tool_call_expr(expr: &str) -> Result<Function> {
+    let expr = expr.trim();
+    let open_idx = expr
+        .find('(')
+        .ok_or_else(|| anyhow!("tool call payload is missing '('"))?;
+    let close_idx = expr
+        .rfind(')')
+        .ok_or_else(|| anyhow!("tool call payload is missing ')'"))?;
+    if close_idx < open_idx {
+        return Err(anyhow!("tool call payload has mismatched parentheses"));
+    }
+
+    let name = expr[..open_idx].trim();
+    if name.is_empty() {
+        return Err(anyhow!("tool call payload is missing function name"));
+    }
+    let args = expr[open_idx + 1..close_idx].trim();
+    let arguments = if args.is_empty() {
+        Value::Object(Map::new())
+    } else {
+        let mut map = Map::new();
+        for item in split_top_level_items(args)? {
+            let (key, value) = split_once_top_level_equals(&item)
+                .ok_or_else(|| anyhow!("tool call argument is missing '=': {item}"))?;
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(anyhow!("tool call argument is missing a name"));
+            }
+            map.insert(key.to_string(), parse_pythonic_value(value.trim())?);
+        }
+        Value::Object(map)
+    };
+
+    Ok(Function {
+        name: name.to_string(),
+        arguments: arguments.to_string(),
+    })
+}
+
+fn parse_pythonic_value(value: &str) -> Result<Value> {
+    let trimmed = value.trim();
+    match trimmed {
+        "true" | "True" => Ok(Value::Bool(true)),
+        "false" | "False" => Ok(Value::Bool(false)),
+        "null" | "None" => Ok(Value::Null),
+        _ => {
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                return Ok(value);
+            }
+            if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+                return Ok(Value::String(unescape_single_quoted_python_string(
+                    &trimmed[1..trimmed.len() - 1],
+                )));
+            }
+            Ok(Value::String(trimmed.to_string()))
+        }
+    }
+}
+
+fn unescape_single_quoted_python_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('\'') => out.push('\''),
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn split_top_level_items(input: &str) -> Result<Vec<String>> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+
+    for ch in input.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_single || in_double => {
+                current.push(ch);
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(ch);
+            }
+            '(' if !in_single && !in_double => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_single && !in_double => {
+                if paren_depth == 0 {
+                    return Err(anyhow!("tool call payload has unmatched ')'"));
+                }
+                paren_depth -= 1;
+                current.push(ch);
+            }
+            '[' if !in_single && !in_double => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' if !in_single && !in_double => {
+                if bracket_depth == 0 {
+                    return Err(anyhow!("tool call payload has unmatched ']'"));
+                }
+                bracket_depth -= 1;
+                current.push(ch);
+            }
+            '{' if !in_single && !in_double => {
+                brace_depth += 1;
+                current.push(ch);
+            }
+            '}' if !in_single && !in_double => {
+                if brace_depth == 0 {
+                    return Err(anyhow!("tool call payload has unmatched '}}'"));
+                }
+                brace_depth -= 1;
+                current.push(ch);
+            }
+            ',' if !in_single
+                && !in_double
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                let item = current.trim();
+                if !item.is_empty() {
+                    items.push(item.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_single || in_double || paren_depth != 0 || bracket_depth != 0 || brace_depth != 0 {
+        return Err(anyhow!("tool call payload is unterminated"));
+    }
+
+    let item = current.trim();
+    if !item.is_empty() {
+        items.push(item.to_string());
+    }
+    Ok(items)
+}
+
+fn split_once_top_level_equals(input: &str) -> Option<(&str, &str)> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+
+    for (idx, ch) in input.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_single || in_double => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '(' if !in_single && !in_double => paren_depth += 1,
+            ')' if !in_single && !in_double => paren_depth = paren_depth.saturating_sub(1),
+            '[' if !in_single && !in_double => bracket_depth += 1,
+            ']' if !in_single && !in_double => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' if !in_single && !in_double => brace_depth += 1,
+            '}' if !in_single && !in_double => brace_depth = brace_depth.saturating_sub(1),
+            '=' if !in_single
+                && !in_double
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                return Some((&input[..idx], &input[idx + ch.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_tool_call_blocks(res: &str) -> Result<(String, Vec<ToolCall>)> {
+    let mut content = String::new();
+    let mut tool_vec = Vec::new();
+    let mut remaining = res;
+
+    while let Some(start) = remaining.find("<tool_call>") {
+        content.push_str(&remaining[..start]);
+        let after_start = &remaining[start + "<tool_call>".len()..];
+        let end = after_start
+            .find("</tool_call>")
+            .ok_or_else(|| anyhow!("tool call block is missing closing tag"))?;
+        let tool_mes = &after_start[..end];
+        for function in parse_tool_call_functions(tool_mes)? {
+            let tool_call = ToolCall {
+                id: tool_vec.len().to_string(),
+                r#type: "function".to_string(),
+                function,
+            };
+            tool_vec.push(tool_call);
+        }
+        remaining = &after_start[end + "</tool_call>".len()..];
+    }
+
+    content.push_str(remaining);
+    Ok((content, tool_vec))
 }
 
 pub fn build_completion_chunk_response(
@@ -588,45 +867,51 @@ pub fn build_completion_chunk_response(
         usage: None,
     };
     let choice = if let Some(tool_call_id) = tool_call_id {
-        let function = if let Some(content) = tool_call_content {
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(json_value) => {
-                    let name = json_value
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    let arguments = json_value.get("arguments").map(|v| v.to_string());
-
-                    DeltaFunction { name, arguments }
+        let content = tool_call_content.unwrap_or_default();
+        match parse_tool_call_functions(&content) {
+            Ok(functions) if !functions.is_empty() => {
+                let mut tool_calls = Vec::with_capacity(functions.len());
+                for (index, function) in functions.into_iter().enumerate() {
+                    let id = if index == 0 {
+                        tool_call_id.clone()
+                    } else {
+                        format!("{tool_call_id}-{index}")
+                    };
+                    tool_calls.push(DeltaToolCall {
+                        index: Some(index as u32),
+                        id: Some(id),
+                        r#type: Some("function".to_string()),
+                        function: DeltaFunction {
+                            name: Some(function.name),
+                            arguments: Some(function.arguments),
+                        },
+                    });
                 }
-                Err(_) => DeltaFunction {
-                    name: None,
-                    arguments: Some(content),
-                },
-            }
-        } else {
-            DeltaFunction {
-                name: None,
-                arguments: None,
-            }
-        };
-        ChatCompletionChunkChoice {
-            index: Some(0),
-            delta: DeltaChatMessage::Assistant {
-                content: None,
-                reasoning_content: None,
-                refusal: None,
-                name: None,
-                tool_calls: Some(vec![DeltaToolCall {
+                ChatCompletionChunkChoice {
                     index: Some(0),
-                    id: Some(tool_call_id),
-                    r#type: Some("function".to_string()),
-                    function,
-                }]),
+                    delta: DeltaChatMessage::Assistant {
+                        content: None,
+                        reasoning_content: None,
+                        refusal: None,
+                        name: None,
+                        tool_calls: Some(tool_calls),
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }
+            }
+            Ok(_) | Err(_) => ChatCompletionChunkChoice {
+                index: Some(0),
+                delta: DeltaChatMessage::Assistant {
+                    content: Some(ChatMessageContent::Text(content)),
+                    reasoning_content: None,
+                    refusal: None,
+                    name: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+                logprobs: None,
             },
-            finish_reason: None,
-            logprobs: None,
         }
     } else {
         ChatCompletionChunkChoice {
@@ -965,5 +1250,34 @@ mod tests {
         let raw = "  Plain text without marker  ";
         let cleaned = clean_asr_response(raw);
         assert_eq!(cleaned, "Plain text without marker");
+    }
+
+    #[test]
+    fn test_build_completion_response_parses_lfm2_5_native_tool_tags() {
+        let response = build_completion_response(
+            "prefix<|tool_call_start|>{\"name\":\"lookup\",\"arguments\":{\"query\":\"rust\"}}<|tool_call_end|>"
+                .to_string(),
+            "lfm2.5-350m",
+            Some(4),
+            Some(8),
+        );
+        let payload = serde_json::to_string(&response).unwrap();
+        assert!(payload.contains("tool_calls"));
+        assert!(payload.contains("lookup"));
+    }
+
+    #[test]
+    fn test_build_completion_response_falls_back_on_invalid_tool_tags() {
+        let response = build_completion_response(
+            "prefix<|tool_call_start|>not-json<|tool_call_end|>suffix".to_string(),
+            "lfm2.5-350m",
+            Some(4),
+            Some(8),
+        );
+        let payload = serde_json::to_string(&response).unwrap();
+        assert!(!payload.contains("\"tool_calls\""));
+        assert!(payload.contains("not-json"));
+        assert!(payload.contains("prefix"));
+        assert!(payload.contains("suffix"));
     }
 }

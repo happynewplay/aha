@@ -2,7 +2,10 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use aha::models::{ArtifactKind, GenerateModel, LoadSpec, ModelInstance, WhichModel, load_model};
+use aha::models::{
+    ArtifactKind, EmbeddingOptions, EmbeddingPromptName, GenerateModel, LoadSpec, ModelInstance,
+    WhichModel, load_model,
+};
 use aha::process::cleanup_pid_file;
 use aha_openai_dive::v1::resources::chat::ChatCompletionParameters;
 use rocket::futures::StreamExt;
@@ -191,6 +194,7 @@ pub(crate) async fn speech(req: Json<ChatCompletionParameters>) -> (Status, Stri
 pub(crate) struct EmbeddingRequest {
     pub model: Option<String>,
     pub input: Value,
+    pub prompt_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +255,13 @@ fn parse_embedding_input(input: &Value) -> anyhow::Result<Vec<String>> {
     }
 }
 
+fn parse_embedding_prompt_name(prompt_name: Option<&str>) -> anyhow::Result<EmbeddingPromptName> {
+    match prompt_name {
+        Some(value) => EmbeddingPromptName::parse_api_str(value),
+        None => Ok(EmbeddingPromptName::Document),
+    }
+}
+
 fn validate_rerank_input(query: &str, documents: &[String]) -> anyhow::Result<()> {
     if query.trim().is_empty() {
         return Err(anyhow::anyhow!("rerank query cannot be empty"));
@@ -287,7 +298,17 @@ pub(crate) async fn embeddings(req: Json<EmbeddingRequest>) -> (Status, Json<Val
         }
     };
     let mut guard = model_ref.write().await;
-    let embeddings = match guard.instance.embedding(&texts) {
+    let prompt_name = match parse_embedding_prompt_name(req.prompt_name.as_deref()) {
+        Ok(value) => value,
+        Err(e) => {
+            return (
+                Status::BadRequest,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+    let options = EmbeddingOptions { prompt_name };
+    let embeddings = match guard.instance.embedding(&texts, &options) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -511,6 +532,27 @@ mod tests {
         let input = serde_json::json!(["a", "b"]);
         let out = parse_embedding_input(&input).unwrap();
         assert_eq!(out, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_embedding_prompt_name_default_document() {
+        let prompt_name = parse_embedding_prompt_name(None).unwrap();
+        assert_eq!(prompt_name, EmbeddingPromptName::Document);
+    }
+
+    #[test]
+    fn test_parse_embedding_prompt_name_query() {
+        let prompt_name = parse_embedding_prompt_name(Some("query")).unwrap();
+        assert_eq!(prompt_name, EmbeddingPromptName::Query);
+    }
+
+    #[test]
+    fn test_parse_embedding_prompt_name_rejects_unsupported_value() {
+        let err = parse_embedding_prompt_name(Some("other")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported embedding prompt_name")
+        );
     }
 
     #[test]

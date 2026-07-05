@@ -2,7 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 use aha::{
-    models::{ArtifactKind, LISTED_MODELS, LoadSpec, ModelPaths, WhichModel, default_artifact},
+    models::{
+        ArtifactKind, EmbeddingOptions, LISTED_MODELS, LoadSpec, ModelPaths, WhichModel,
+        default_artifact,
+    },
     process::{cleanup_pid_file, create_pid_file},
     utils::{download_model, get_default_save_dir},
 };
@@ -103,6 +106,21 @@ impl From<ArtifactArg> for ArtifactKind {
             ArtifactArg::Safetensors => ArtifactKind::Safetensors,
             ArtifactArg::Gguf => ArtifactKind::Gguf,
             ArtifactArg::Onnx => ArtifactKind::Onnx,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RunEmbeddingPromptArg {
+    Query,
+    Document,
+}
+
+impl From<RunEmbeddingPromptArg> for aha::models::EmbeddingPromptName {
+    fn from(value: RunEmbeddingPromptArg) -> Self {
+        match value {
+            RunEmbeddingPromptArg::Query => Self::Query,
+            RunEmbeddingPromptArg::Document => Self::Document,
         }
     }
 }
@@ -243,6 +261,10 @@ struct RunArgs {
     /// Maximum number of tokens to generate
     #[arg(long)]
     max_tokens: Option<u32>,
+
+    /// Embedding prompt name for embedding-capable models
+    #[arg(long = "prompt-name")]
+    prompt_name: Option<RunEmbeddingPromptArg>,
 
     /// Local model weight path (defaults to ~/.aha/{model_id} if not specified)
     #[arg(long)]
@@ -446,12 +468,8 @@ async fn resolve_load_spec_for_server(
     artifact: Option<ArtifactArg>,
     allow_download: bool,
 ) -> anyhow::Result<LoadSpec> {
-    let artifact = resolve_artifact_kind(
-        model,
-        artifact,
-        gguf_path.as_deref(),
-        onnx_path.as_deref(),
-    );
+    let artifact =
+        resolve_artifact_kind(model, artifact, gguf_path.as_deref(), onnx_path.as_deref());
     let weight_dir = match artifact {
         ArtifactKind::Safetensors => match weight_path {
             Some(path) => Some(path),
@@ -516,8 +534,13 @@ fn resolve_load_spec_for_run(args: &RunArgs) -> anyhow::Result<LoadSpec> {
 }
 
 fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result<bool> {
-    if args.request_json.is_some() && args.model != WhichModel::MiniCPM5_1B {
-        return Err(anyhow!("--request-json is only supported for minicpm5-1b"));
+    if args.request_json.is_some()
+        && args.model != WhichModel::MiniCPM5_1B
+        && args.model != WhichModel::LFM2_5_350M
+    {
+        return Err(anyhow!(
+            "--request-json is only supported for minicpm5-1b and lfm2.5-350m"
+        ));
     }
     match args.model {
         WhichModel::AllMiniLML6V2 => {
@@ -567,6 +590,24 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
         | WhichModel::Qwen3_5_4BLmstudioGguf => {
             use aha::exec::qwen3_5::Qwen3_5Exec;
             Qwen3_5Exec::run_with_spec(&args.input, args.output.as_deref(), spec)?;
+            Ok(true)
+        }
+        WhichModel::LFM2_5_350M => {
+            use aha::exec::lfm2_5::Lfm2_5Exec;
+            Lfm2_5Exec::run_with_spec(
+                &args.input,
+                args.output.as_deref(),
+                spec,
+                args.request_json.as_deref(),
+            )?;
+            Ok(true)
+        }
+        WhichModel::LFM2_5Embedding350M => {
+            use aha::exec::lfm2_5_embedding::Lfm2_5EmbeddingExec;
+            let options = EmbeddingOptions {
+                prompt_name: args.prompt_name.map(Into::into).unwrap_or_default(),
+            };
+            Lfm2_5EmbeddingExec::run_with_spec(&args.input, args.output.as_deref(), spec, options)?;
             Ok(true)
         }
         WhichModel::GlmOCR => {
@@ -891,8 +932,10 @@ fn run_run(args: RunArgs) -> anyhow::Result<()> {
         | WhichModel::Qwen3_5_0_8BLmstudioGguf
         | WhichModel::Qwen3_5_2BLmstudioGguf
         | WhichModel::Qwen3_5_4BLmstudioGguf
+        | WhichModel::LFM2_5_350M
+        | WhichModel::LFM2_5Embedding350M
         | WhichModel::Yolo11Detect => unreachable!(
-            "qwen3.5 gguf models should already be handled by run_target_model_with_spec"
+            "qwen3.5 gguf, lfm2.5 and lfm2.5 embedding models should already be handled by run_target_model_with_spec"
         ),
     }
 
@@ -1175,7 +1218,34 @@ mod tests {
             panic!("expected run subcommand");
         };
         assert_eq!(args.model, WhichModel::MiniCPM5_1B);
-        assert_eq!(args.weight_path.as_deref(), Some("D:\\model_download\\MiniCPM5-1B"));
+        assert_eq!(
+            args.weight_path.as_deref(),
+            Some("D:\\model_download\\MiniCPM5-1B")
+        );
+    }
+
+    #[test]
+    fn parse_run_lfm2_5_weight_path_flags() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "lfm2.5-350m",
+            "--input",
+            "hello",
+            "--weight-path",
+            "D:\\model_download\\LFM2.5-350M",
+        ])
+        .expect("run args should parse");
+
+        let Some(Commands::Run(args)) = cli.command else {
+            panic!("expected run subcommand");
+        };
+        assert_eq!(args.model, WhichModel::LFM2_5_350M);
+        assert_eq!(
+            args.weight_path.as_deref(),
+            Some("D:\\model_download\\LFM2.5-350M")
+        );
     }
 
     #[test]
@@ -1244,6 +1314,30 @@ mod tests {
             Some("D:\\model_download\\minicpm5_request.json")
         );
         assert!(args.input.is_empty());
+    }
+
+    #[test]
+    fn parse_run_prompt_name_query() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "lfm2.5-embedding-350m",
+            "--input",
+            "hello",
+            "--prompt-name",
+            "query",
+        ])
+        .expect("run args should parse");
+
+        let Some(Commands::Run(args)) = cli.command else {
+            panic!("expected run subcommand");
+        };
+        assert_eq!(args.model, WhichModel::LFM2_5Embedding350M);
+        assert!(matches!(
+            args.prompt_name,
+            Some(RunEmbeddingPromptArg::Query)
+        ));
     }
 
     #[test]
