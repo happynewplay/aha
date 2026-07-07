@@ -4,7 +4,8 @@ use crate::models::{
     ModelInstance, WhichModel, all_minilm_l6_v2::generate::AllMiniLML6V2Model,
     glm_ocr::generate::GlmOcrGenerateModel, lfm2_5::generate::Lfm2_5GenerateModel,
     lfm2_5_embedding::generate::Lfm2_5EmbeddingModel, load_model_legacy,
-    minicpm5::generate::MiniCPM5GenerateModel, qwen3::generate::Qwen3GenerateModel,
+    minicpm5::generate::MiniCPM5GenerateModel,
+    mxbai_embed_xsmall_v1::generate::MxbaiEmbedXsmallV1Model, qwen3::generate::Qwen3GenerateModel,
     qwen3_5::generate::Qwen3_5GenerateModel, qwen3_embedding::generate::Qwen3EmbeddingModel,
     qwen3_reranker::generate::Qwen3RerankerModel, yolo::generate::YoloGenerateModel,
 };
@@ -17,6 +18,7 @@ enum ModelLoaderFamily {
     MiniCPM5,
     LFM2_5,
     GlmOCR,
+    MxbaiEmbedXsmallV1,
     Qwen3,
     Qwen3Embedding,
     Qwen3Reranker,
@@ -32,6 +34,7 @@ fn resolve_model_loader_family(model: WhichModel) -> ModelLoaderFamily {
         WhichModel::MiniCPM5_1B => ModelLoaderFamily::MiniCPM5,
         WhichModel::LFM2_5_350M => ModelLoaderFamily::LFM2_5,
         WhichModel::LFM2_5Embedding350M => ModelLoaderFamily::LFM2_5Embedding,
+        WhichModel::MxbaiEmbedXsmallV1 => ModelLoaderFamily::MxbaiEmbedXsmallV1,
         WhichModel::GlmOCR => ModelLoaderFamily::GlmOCR,
         WhichModel::Qwen3_0_6B => ModelLoaderFamily::Qwen3,
         WhichModel::Qwen3Embedding0_6B
@@ -71,6 +74,9 @@ pub fn load_model_from_spec<'a>(spec: &LoadSpec) -> Result<ModelInstance<'a>> {
         ModelLoaderFamily::LFM2_5Embedding => {
             ModelInstance::LFM2_5Embedding(Lfm2_5EmbeddingModel::init_from_spec(spec, None, None)?)
         }
+        ModelLoaderFamily::MxbaiEmbedXsmallV1 => ModelInstance::MxbaiEmbedXsmallV1(
+            MxbaiEmbedXsmallV1Model::init_from_spec(spec, None, None)?,
+        ),
         ModelLoaderFamily::GlmOCR => {
             ModelInstance::GlmOCR(GlmOcrGenerateModel::init_from_spec(spec, None, None)?)
         }
@@ -121,6 +127,10 @@ mod tests {
         assert_eq!(
             resolve_model_loader_family(WhichModel::Qwen3Embedding0_6B),
             ModelLoaderFamily::Qwen3Embedding
+        );
+        assert_eq!(
+            resolve_model_loader_family(WhichModel::MxbaiEmbedXsmallV1),
+            ModelLoaderFamily::MxbaiEmbedXsmallV1
         );
         assert_eq!(
             resolve_model_loader_family(WhichModel::Qwen3Reranker0_6B),

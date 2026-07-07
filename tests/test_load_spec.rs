@@ -154,6 +154,54 @@ fn load_spec_all_minilm_accepts_gguf() {
 }
 
 #[test]
+fn load_spec_mxbai_embed_xsmall_v1_auto_resolves_to_safetensors_default() {
+    let spec = LoadSpec {
+        model: WhichModel::MxbaiEmbedXsmallV1,
+        artifact: ArtifactKind::Auto,
+        paths: ModelPaths {
+            weight_dir: Some("D:/model_download/mxbai-embed-xsmall-v1".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert_eq!(spec.resolved_artifact(), ArtifactKind::Safetensors);
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_mxbai_embed_xsmall_v1_accepts_gguf() {
+    let spec = LoadSpec {
+        model: WhichModel::MxbaiEmbedXsmallV1,
+        artifact: ArtifactKind::Gguf,
+        paths: ModelPaths {
+            gguf_path: Some(
+                "D:/model_download/mxbai-embed-xsmall-v1/gguf/mxbai-embed-xsmall-v1-f16.gguf"
+                    .to_string(),
+            ),
+            tokenizer_dir: Some("D:/model_download/mxbai-embed-xsmall-v1".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
+fn load_spec_mxbai_embed_xsmall_v1_accepts_onnx() {
+    let spec = LoadSpec {
+        model: WhichModel::MxbaiEmbedXsmallV1,
+        artifact: ArtifactKind::Onnx,
+        paths: ModelPaths {
+            onnx_path: Some("D:/model_download/mxbai-embed-xsmall-v1/onnx".to_string()),
+            tokenizer_dir: Some("D:/model_download/mxbai-embed-xsmall-v1".to_string()),
+            ..Default::default()
+        },
+    };
+
+    assert!(spec.validate().is_ok());
+}
+
+#[test]
 fn load_spec_minicpm5_accepts_gguf() {
     let spec = LoadSpec {
         model: WhichModel::MiniCPM5_1B,

@@ -14,6 +14,7 @@ pub mod lfm2_5_embedding;
 pub mod mask_gct;
 pub mod minicpm4;
 pub mod minicpm5;
+pub mod mxbai_embed_xsmall_v1;
 pub mod paddleocr_vl;
 pub mod qwen2;
 pub mod qwen2_5vl;
@@ -41,12 +42,14 @@ use crate::models::{
     glm_asr_nano::generate::GlmAsrNanoGenerateModel, glm_ocr::generate::GlmOcrGenerateModel,
     hunyuan_ocr::generate::HunyuanOCRGenerateModel, lfm2_5::generate::Lfm2_5GenerateModel,
     lfm2_5_embedding::generate::Lfm2_5EmbeddingModel, minicpm4::generate::MiniCPMGenerateModel,
-    minicpm5::generate::MiniCPM5GenerateModel, paddleocr_vl::generate::PaddleOCRVLGenerateModel,
-    qwen2_5vl::generate::Qwen2_5VLGenerateModel, qwen3::generate::Qwen3GenerateModel,
-    qwen3_5::generate::Qwen3_5GenerateModel, qwen3_asr::generate::Qwen3AsrGenerateModel,
-    qwen3_embedding::generate::Qwen3EmbeddingModel, qwen3_reranker::generate::Qwen3RerankerModel,
-    qwen3vl::generate::Qwen3VLGenerateModel, rmbg2_0::generate::RMBG2_0Model,
-    voxcpm::generate::VoxCPMGenerate, yolo::generate::YoloGenerateModel,
+    minicpm5::generate::MiniCPM5GenerateModel,
+    mxbai_embed_xsmall_v1::generate::MxbaiEmbedXsmallV1Model,
+    paddleocr_vl::generate::PaddleOCRVLGenerateModel, qwen2_5vl::generate::Qwen2_5VLGenerateModel,
+    qwen3::generate::Qwen3GenerateModel, qwen3_5::generate::Qwen3_5GenerateModel,
+    qwen3_asr::generate::Qwen3AsrGenerateModel, qwen3_embedding::generate::Qwen3EmbeddingModel,
+    qwen3_reranker::generate::Qwen3RerankerModel, qwen3vl::generate::Qwen3VLGenerateModel,
+    rmbg2_0::generate::RMBG2_0Model, voxcpm::generate::VoxCPMGenerate,
+    yolo::generate::YoloGenerateModel,
 };
 
 pub use core::artifact::{
@@ -77,6 +80,8 @@ pub enum WhichModel {
     LFM2_5_350M,
     #[value(name = "lfm2.5-embedding-350m", hide = true)]
     LFM2_5Embedding350M,
+    #[value(name = "mxbai-embed-xsmall-v1", hide = true)]
+    MxbaiEmbedXsmallV1,
     #[value(name = "all-minilm-l6-v2", hide = true)]
     AllMiniLML6V2,
     #[value(name = "qwen3-embedding-0.6b", hide = true)]
@@ -159,6 +164,7 @@ pub const LISTED_MODELS: &[WhichModel] = &[
     WhichModel::Qwen3_0_6B,
     WhichModel::LFM2_5_350M,
     WhichModel::LFM2_5Embedding350M,
+    WhichModel::MxbaiEmbedXsmallV1,
     WhichModel::AllMiniLML6V2,
     WhichModel::Qwen3Embedding0_6B,
     WhichModel::Qwen3Embedding4B,
@@ -214,7 +220,10 @@ impl WhichModel {
     pub fn is_download_managed(self) -> bool {
         !matches!(
             self,
-            WhichModel::AllMiniLML6V2 | WhichModel::LFM2_5_350M | WhichModel::LFM2_5Embedding350M
+            WhichModel::AllMiniLML6V2
+                | WhichModel::LFM2_5_350M
+                | WhichModel::LFM2_5Embedding350M
+                | WhichModel::MxbaiEmbedXsmallV1
         ) && !matches!(
             self.artifact_format(),
             ModelArtifactFormat::Gguf | ModelArtifactFormat::Onnx
@@ -230,6 +239,7 @@ impl WhichModel {
             WhichModel::Qwen3_0_6B => "qwen3-0.6b",
             WhichModel::LFM2_5_350M => "lfm2.5-350m",
             WhichModel::LFM2_5Embedding350M => "lfm2.5-embedding-350m",
+            WhichModel::MxbaiEmbedXsmallV1 => "mxbai-embed-xsmall-v1",
             WhichModel::AllMiniLML6V2 => "all-minilm-l6-v2",
             WhichModel::Qwen3Embedding0_6B => "qwen3-embedding-0.6b",
             WhichModel::Qwen3Embedding4B => "qwen3-embedding-4b",
@@ -286,6 +296,7 @@ impl WhichModel {
             | WhichModel::Qwen3ASR1_7B => "Qwen",
             WhichModel::LFM2_5_350M => "LiquidAI",
             WhichModel::LFM2_5Embedding350M => "LiquidAI",
+            WhichModel::MxbaiEmbedXsmallV1 => "mixedbread-ai",
             WhichModel::Qwen3vl2B
             | WhichModel::Qwen3vl4B
             | WhichModel::Qwen3vl8B
@@ -322,6 +333,7 @@ impl WhichModel {
             WhichModel::Qwen3_0_6B => "Qwen/Qwen3-0.6B",
             WhichModel::LFM2_5_350M => "LiquidAI/LFM2.5-350M",
             WhichModel::LFM2_5Embedding350M => "LiquidAI/LFM2.5-Embedding-350M",
+            WhichModel::MxbaiEmbedXsmallV1 => "mixedbread-ai/mxbai-embed-xsmall-v1",
             WhichModel::AllMiniLML6V2 => "sentence-transformers/all-MiniLM-L6-v2",
             WhichModel::Qwen3Embedding0_6B => "Qwen/Qwen3-Embedding-0.6B",
             WhichModel::Qwen3Embedding4B => "Qwen/Qwen3-Embedding-4B",
@@ -367,7 +379,7 @@ impl WhichModel {
             // LLM models
             WhichModel::MiniCPM4_0_5B | WhichModel::MiniCPM5_1B | WhichModel::Qwen3_0_6B => "llm",
             WhichModel::LFM2_5_350M => "llm",
-            WhichModel::LFM2_5Embedding350M => "embedding",
+            WhichModel::LFM2_5Embedding350M | WhichModel::MxbaiEmbedXsmallV1 => "embedding",
             WhichModel::AllMiniLML6V2
             | WhichModel::Qwen3Embedding0_6B
             | WhichModel::Qwen3Embedding4B
@@ -457,6 +469,7 @@ pub enum ModelInstance<'a> {
     Qwen3(Qwen3GenerateModel<'a>),
     LFM2_5(Lfm2_5GenerateModel<'a>),
     LFM2_5Embedding(Lfm2_5EmbeddingModel),
+    MxbaiEmbedXsmallV1(MxbaiEmbedXsmallV1Model),
     AllMiniLML6V2(AllMiniLML6V2Model),
     Qwen3Embedding(Qwen3EmbeddingModel),
     Qwen3Reranker(Qwen3RerankerModel),
@@ -483,6 +496,9 @@ impl<'a> GenerateModel for ModelInstance<'a> {
             ModelInstance::Qwen3(model) => model.generate(mes),
             ModelInstance::LFM2_5(model) => model.generate(mes),
             ModelInstance::LFM2_5Embedding(_) => {
+                Err(anyhow!("embedding model does not support chat completions"))
+            }
+            ModelInstance::MxbaiEmbedXsmallV1(_) => {
                 Err(anyhow!("embedding model does not support chat completions"))
             }
             ModelInstance::AllMiniLML6V2(_) => {
@@ -529,6 +545,9 @@ impl<'a> GenerateModel for ModelInstance<'a> {
             ModelInstance::LFM2_5Embedding(_) => Err(anyhow!(
                 "embedding model does not support streaming chat completions"
             )),
+            ModelInstance::MxbaiEmbedXsmallV1(_) => Err(anyhow!(
+                "embedding model does not support streaming chat completions"
+            )),
             ModelInstance::AllMiniLML6V2(_) => Err(anyhow!(
                 "embedding model does not support streaming chat completions"
             )),
@@ -563,6 +582,7 @@ impl<'a> ModelInstance<'a> {
         match self {
             ModelInstance::AllMiniLML6V2(model) => model.embed(input),
             ModelInstance::Qwen3Embedding(model) => model.embed(input),
+            ModelInstance::MxbaiEmbedXsmallV1(model) => model.embed(input),
             ModelInstance::LFM2_5Embedding(model) => model.embed_with_options(input, *options),
             _ => Err(anyhow!("current model does not support embeddings")),
         }
@@ -619,6 +639,10 @@ pub fn load_model_legacy<'a>(
             return Err(anyhow!(
                 "lfm2.5-embedding-350m must be loaded through a dedicated embedding backend"
             ));
+        }
+        WhichModel::MxbaiEmbedXsmallV1 => {
+            let model = MxbaiEmbedXsmallV1Model::init(path, None, None)?;
+            ModelInstance::MxbaiEmbedXsmallV1(model)
         }
         WhichModel::AllMiniLML6V2 => {
             let model = AllMiniLML6V2Model::init(path, None, None)?;

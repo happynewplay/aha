@@ -182,6 +182,33 @@ aha serv -m minicpm5-1b --gguf-path D:/model_download/MiniCPM5-1B-GGUF/MiniCPM5-
 
 > **注意：** 使用 GGUF 或 ONNX 格式时，需要通过 `--tokenizer-dir` 提供 tokenizer 配置文件。使用多模态 GGUF 模型（如 Qwen3-VL）时，还需要 `--mmproj-path`。
 
+#### mxbai-embed-xsmall-v1 三种格式启动示例
+
+下面命令假设本地模型目录为 `D:\model_download\mxbai-embed-xsmall-v1`。服务启动后，可以直接调用 `/embeddings` 接口。
+
+```bash
+# 1. 原始模型（safetensors）
+aha serv -m mxbai-embed-xsmall-v1 --weight-path D:\model_download\mxbai-embed-xsmall-v1 -p 10100
+
+# 2. GGUF
+aha serv -m mxbai-embed-xsmall-v1 --artifact-format gguf --gguf-path D:\model_download\mxbai-embed-xsmall-v1\gguf\mxbai-embed-xsmall-v1-q8_0.gguf --tokenizer-dir D:\model_download\mxbai-embed-xsmall-v1 -p 10100
+
+# 3. ONNX
+# 如果当前二进制未启用 onnx-runtime，请先用 `cargo build --release --features onnx-runtime` 重新构建。
+aha serv -m mxbai-embed-xsmall-v1 --artifact-format onnx --onnx-path D:\model_download\mxbai-embed-xsmall-v1\onnx\model_q4f16.onnx --tokenizer-dir D:\model_download\mxbai-embed-xsmall-v1 -p 10100
+```
+
+启动后可以用下面的请求验证 embeddings 接口：
+
+```bash
+curl http://localhost:10100/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mxbai-embed-xsmall-v1",
+    "input": ["Rust embedding test"]
+  }'
+```
+
 ### 对话
 
 ```bash
@@ -206,7 +233,7 @@ curl http://localhost:10100/chat/completions \
 | 类别 | 模型 |
 |------|------|
 | **文本** | Qwen3, MiniCPM4 |
-| **向量** | Qwen3-Embedding, LFM2.5-Embedding-350M, all-MiniLM-L6-v2 |
+| **向量** | Qwen3-Embedding, LFM2.5-Embedding-350M, all-MiniLM-L6-v2, mxbai-embed-xsmall-v1 |
 | **视觉** | Qwen2.5-VL, Qwen3-VL |
 | **OCR** | DeepSeek-OCR, Hunyuan-OCR, PaddleOCR-VL |
 | **ASR** | GLM-ASR-Nano, Fun-ASR-Nano,Qwen3-ASR |

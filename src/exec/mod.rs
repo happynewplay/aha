@@ -13,6 +13,7 @@ pub mod lfm2_5;
 pub mod lfm2_5_embedding;
 pub mod minicpm4;
 pub mod minicpm5;
+pub mod mxbai_embed_xsmall_v1;
 pub mod paddleocr_vl;
 pub mod qwen2_5vl;
 pub mod qwen3;

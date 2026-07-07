@@ -548,6 +548,11 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
             AllMiniLML6V2Exec::run_with_spec(&args.input, args.output.as_deref(), spec)?;
             Ok(true)
         }
+        WhichModel::MxbaiEmbedXsmallV1 => {
+            use aha::exec::mxbai_embed_xsmall_v1::MxbaiEmbedXsmallV1Exec;
+            MxbaiEmbedXsmallV1Exec::run_with_spec(&args.input, args.output.as_deref(), spec)?;
+            Ok(true)
+        }
         WhichModel::MiniCPM5_1B => {
             use aha::exec::minicpm5::MiniCPM5Exec;
             MiniCPM5Exec::run_with_spec(
@@ -934,8 +939,9 @@ fn run_run(args: RunArgs) -> anyhow::Result<()> {
         | WhichModel::Qwen3_5_4BLmstudioGguf
         | WhichModel::LFM2_5_350M
         | WhichModel::LFM2_5Embedding350M
+        | WhichModel::MxbaiEmbedXsmallV1
         | WhichModel::Yolo11Detect => unreachable!(
-            "qwen3.5 gguf, lfm2.5 and lfm2.5 embedding models should already be handled by run_target_model_with_spec"
+            "qwen3.5 gguf, lfm2.5, mxbai embedding, and yolo models should already be handled by run_target_model_with_spec"
         ),
     }
 
@@ -1294,6 +1300,72 @@ mod tests {
     }
 
     #[test]
+    fn parse_mxbai_embed_xsmall_v1_run_onnx_flags() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "mxbai-embed-xsmall-v1",
+            "--input",
+            "hello",
+            "--artifact-format",
+            "onnx",
+            "--onnx-path",
+            "D:\\model_download\\mxbai-embed-xsmall-v1\\onnx",
+            "--tokenizer-dir",
+            "D:\\model_download\\mxbai-embed-xsmall-v1",
+        ])
+        .expect("run args should parse");
+
+        let Some(Commands::Run(args)) = cli.command else {
+            panic!("expected run subcommand");
+        };
+        assert!(matches!(args.artifact_format, Some(ArtifactArg::Onnx)));
+        assert_eq!(args.model, WhichModel::MxbaiEmbedXsmallV1);
+        assert_eq!(
+            args.onnx_path.as_deref(),
+            Some("D:\\model_download\\mxbai-embed-xsmall-v1\\onnx")
+        );
+        assert_eq!(
+            args.tokenizer_dir.as_deref(),
+            Some("D:\\model_download\\mxbai-embed-xsmall-v1")
+        );
+    }
+
+    #[test]
+    fn parse_mxbai_embed_xsmall_v1_run_gguf_flags() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "mxbai-embed-xsmall-v1",
+            "--input",
+            "hello",
+            "--artifact-format",
+            "gguf",
+            "--gguf-path",
+            "D:\\model_download\\mxbai-embed-xsmall-v1\\gguf\\mxbai-embed-xsmall-v1-f16.gguf",
+            "--tokenizer-dir",
+            "D:\\model_download\\mxbai-embed-xsmall-v1",
+        ])
+        .expect("run args should parse");
+
+        let Some(Commands::Run(args)) = cli.command else {
+            panic!("expected run subcommand");
+        };
+        assert!(matches!(args.artifact_format, Some(ArtifactArg::Gguf)));
+        assert_eq!(args.model, WhichModel::MxbaiEmbedXsmallV1);
+        assert_eq!(
+            args.gguf_path.as_deref(),
+            Some("D:\\model_download\\mxbai-embed-xsmall-v1\\gguf\\mxbai-embed-xsmall-v1-f16.gguf")
+        );
+        assert_eq!(
+            args.tokenizer_dir.as_deref(),
+            Some("D:\\model_download\\mxbai-embed-xsmall-v1")
+        );
+    }
+
+    #[test]
     fn parse_run_minicpm5_request_json_flags() {
         let cli = Cli::try_parse_from([
             "aha",
@@ -1476,6 +1548,37 @@ mod tests {
         assert_eq!(
             args.tokenizer_dir.as_deref(),
             Some("D:\\model_download\\Qwen3-Reranker-0.6B-ONNX")
+        );
+    }
+
+    #[test]
+    fn parse_serv_mxbai_embed_xsmall_v1_onnx_flags() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "serv",
+            "--model",
+            "mxbai-embed-xsmall-v1",
+            "--artifact-format",
+            "onnx",
+            "--onnx-path",
+            "D:\\model_download\\mxbai-embed-xsmall-v1\\onnx",
+            "--tokenizer-dir",
+            "D:\\model_download\\mxbai-embed-xsmall-v1",
+        ])
+        .expect("serv args should parse");
+
+        let Some(Commands::Serv(args)) = cli.command else {
+            panic!("expected serv subcommand");
+        };
+        assert_eq!(args.common.model, WhichModel::MxbaiEmbedXsmallV1);
+        assert!(matches!(args.artifact_format, Some(ArtifactArg::Onnx)));
+        assert_eq!(
+            args.onnx_path.as_deref(),
+            Some("D:\\model_download\\mxbai-embed-xsmall-v1\\onnx")
+        );
+        assert_eq!(
+            args.tokenizer_dir.as_deref(),
+            Some("D:\\model_download\\mxbai-embed-xsmall-v1")
         );
     }
 

@@ -30,6 +30,11 @@ pub fn supported_artifacts(model: WhichModel) -> &'static [ArtifactKind] {
     match model {
         WhichModel::MiniCPM5_1B => &[ArtifactKind::Safetensors, ArtifactKind::Gguf],
         WhichModel::LFM2_5Embedding350M => &[ArtifactKind::Safetensors],
+        WhichModel::MxbaiEmbedXsmallV1 => &[
+            ArtifactKind::Safetensors,
+            ArtifactKind::Gguf,
+            ArtifactKind::Onnx,
+        ],
         WhichModel::LFM2_5_350M => &[
             ArtifactKind::Safetensors,
             ArtifactKind::Gguf,
@@ -91,6 +96,7 @@ pub fn default_artifact(model: WhichModel) -> ArtifactKind {
         | WhichModel::Qwen3_5_4BLmstudioGguf => ArtifactKind::Gguf,
         WhichModel::Yolo11Detect => ArtifactKind::Onnx,
         WhichModel::LFM2_5Embedding350M => ArtifactKind::Safetensors,
+        WhichModel::MxbaiEmbedXsmallV1 => ArtifactKind::Safetensors,
         WhichModel::MiniCPM5_1B | WhichModel::LFM2_5_350M => ArtifactKind::Safetensors,
         _ => ArtifactKind::Safetensors,
     }

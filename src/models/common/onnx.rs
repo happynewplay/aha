@@ -210,10 +210,71 @@ pub fn resolve_tokenizer_dir(
 }
 
 #[cfg(feature = "onnx-runtime")]
-pub fn create_session(path: &str, _cfg: Option<&OnnxRuntimeConfig>) -> Result<OnnxSessionBundle> {
+fn configure_session_builder(
+    mut builder: ort::session::builder::SessionBuilder,
+    cfg: Option<&OnnxRuntimeConfig>,
+    optimization_level: ort::session::builder::GraphOptimizationLevel,
+) -> Result<ort::session::builder::SessionBuilder> {
+    builder = builder
+        .with_optimization_level(optimization_level)
+        .map_err(|err| anyhow!("failed to set ONNX optimization level {optimization_level:?}: {err}"))?;
+    if let Some(cfg) = cfg {
+        if let Some(intra_threads) = cfg.intra_threads {
+            builder = builder
+                .with_intra_threads(intra_threads)
+                .map_err(|err| anyhow!("failed to set ONNX intra threads to {intra_threads}: {err}"))?;
+        }
+        if let Some(inter_threads) = cfg.inter_threads {
+            builder = builder
+                .with_inter_threads(inter_threads)
+                .map_err(|err| anyhow!("failed to set ONNX inter threads to {inter_threads}: {err}"))?;
+        }
+    }
+    Ok(builder)
+}
+
+#[cfg(feature = "onnx-runtime")]
+pub(crate) fn try_create_session_with_optimization_fallbacks<T, F>(mut create: F) -> Result<T>
+where
+    F: FnMut(ort::session::builder::GraphOptimizationLevel) -> Result<T>,
+{
+    use ort::session::builder::GraphOptimizationLevel;
+
+    let levels = [
+        GraphOptimizationLevel::All,
+        GraphOptimizationLevel::Level1,
+        GraphOptimizationLevel::Disable,
+    ];
+    let mut last_error = None;
+
+    for level in levels {
+        match create(level) {
+            Ok(value) => return Ok(value),
+            Err(err) => last_error = Some((level, err)),
+        }
+    }
+
+    let (last_level, last_error) = last_error.expect("optimization fallback levels are non-empty");
+    Err(last_error.context(format!(
+        "failed to create onnx session after retrying optimization levels [All, Level1, Disable]; last attempted level: {last_level:?}"
+    )))
+}
+
+#[cfg(feature = "onnx-runtime")]
+pub fn create_session(path: &str, cfg: Option<&OnnxRuntimeConfig>) -> Result<OnnxSessionBundle> {
     let _ = ensure_ort_dylib_path()?;
     let model_file = resolve_onnx_file(path)?;
-    let session = ort::session::Session::builder()?.commit_from_file(model_file)?;
+    let session = try_create_session_with_optimization_fallbacks(|level| {
+        let builder = ort::session::Session::builder()
+            .map_err(|err| anyhow!("failed to create ONNX session builder: {err}"))?;
+        let mut builder = configure_session_builder(builder, cfg, level)?;
+        builder.commit_from_file(&model_file).map_err(|err| {
+            anyhow!(
+                "failed to commit ONNX model {} with optimization level {level:?}: {err}",
+                model_file.display()
+            )
+        })
+    })?;
     let input_names = session
         .inputs()
         .iter()
