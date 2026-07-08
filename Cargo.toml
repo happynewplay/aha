@@ -52,12 +52,21 @@ ndarray = "0.17"
 [patch.crates-io]
 esaxx-rs = { path = "vendor/esaxx-rs" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.11.0", features = ["accelerate"] }
+
 [features]
 flash-attn = ["candle-flash-attn"]
 cuda = ["candle-nn/cuda", "candle-core/cuda", "candle-transformers/cuda"]
 metal = ["candle-nn/metal", "candle-core/metal", "candle-transformers/metal"]
+cpu-mkl = ["candle-core/mkl"]
 
 onnx-runtime = ["dep:ort"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
 
 [lints.clippy]
 needless_range_loop = "allow"

@@ -67,7 +67,16 @@ cargo build --release
 
 **可选特性：**
 
+`cargo build --release` 是默认构建方式。当前仓库已经把 release 优化写入 `Cargo.toml`，包括 `lto = true`、`codegen-units = 1`、`panic = "abort"`。
+
+- macOS 默认会走 Candle 的 `accelerate` 后端，无需额外 feature。
+- `cpu-mkl` 是可选的 Candle MKL 后端；只有在你的平台和工具链支持该链接方式时才建议显式开启。
+- 如果需要叠加多个 feature，可以用逗号分隔。
+
 ```bash
+# x86 / x86_64 CPU 加速（MKL，按环境可选）
+cargo build --release --features cpu-mkl
+
 # CUDA (NVIDIA GPU 加速)
 cargo build --release --features cuda
 
@@ -77,8 +86,14 @@ cargo build --release --features metal
 # Flash Attention (更快推理)
 cargo build --release --features cuda,flash-attn
 
-# FFmpeg (多媒体处理)
-cargo build --release --features ffmpeg
+# ONNX Runtime
+cargo build --release --features onnx-runtime
+```
+
+如果你要同时开启多个 feature，例如：
+
+```bash
+cargo build --release --features "cpu-mkl,onnx-runtime"
 ```
 
 ### CLI 快速参考
@@ -178,9 +193,62 @@ aha serv -m minicpm5-1b --weight-path D:/model_download/MiniCPM5-1B -p 10100
 
 aha serv -m minicpm5-1b --gguf-path D:/model_download/MiniCPM5-1B-GGUF/MiniCPM5-1B-Q4_K_M.gguf -p 10100
 
+
 ```
 
 > **注意：** 使用 GGUF 或 ONNX 格式时，需要通过 `--tokenizer-dir` 提供 tokenizer 配置文件。使用多模态 GGUF 模型（如 Qwen3-VL）时，还需要 `--mmproj-path`。
+
+#### LFM2.5-350M 使用示例
+
+`LFM2.5-350M` 是一个轻量文本模型，支持 `run` 直接推理、`serv` 启动本地服务，以及 `--request-json` 传入完整的 OpenAI 风格请求体。
+
+```bash
+# 1. Safetensors（默认）
+aha serv -m lfm2.5-350m --weight-path D:\model_download\LFM2.5-350M
+
+# 2. GGUF
+aha serv -m lfm2.5-350m --artifact-format gguf --gguf-path D:\model_download\LFM2.5-350M-GGUF\LFM2.5-350M-Q8_0.gguf --tokenizer-dir D:\model_download\LFM2.5-350M
+
+# 3. ONNX
+aha serv -m lfm2.5-350m --artifact-format onnx --onnx-path D:\model_download\LFM2.5-350M-ONNX\onnx\model_q4f16.onnx --tokenizer-dir D:\model_download\LFM2.5-350M-ONNX
+```
+
+如果你希望自行控制 `messages`、`max_tokens`、`temperature` 等参数，可以把完整请求写入 JSON 文件，再通过 `--request-json` 传入：
+
+```json
+{
+  "model": "lfm2.5-350m",
+  "max_tokens": 128,
+  "messages": [
+    {
+      "role": "user",
+      "content": "请用一句话介绍 Rust。"
+    }
+  ]
+}
+```
+
+```bash
+aha run -m lfm2.5-350m --weight-path D:\model_download\LFM2.5-350M --request-json D:\model_download\lfm2_5_request.json
+```
+
+启动本地服务后，可以直接走兼容 OpenAI 的 `/chat/completions` 接口：
+
+```bash
+aha serv -m lfm2.5-350m --weight-path D:\model_download\LFM2.5-350M -p 10100
+```
+
+```bash
+curl http://localhost:10100/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "lfm2.5-350m",
+    "messages": [{"role": "user", "content": "你好，请介绍一下 Rust。"}],
+    "stream": false
+  }'
+```
+
+> **说明：** `--request-json` 只对 `minicpm5-1b` 和 `lfm2.5-350m` 生效；`LFM2.5-350M` 的工具调用输出会自动适配为标准 OpenAI `tool_calls` 格式。
 
 #### mxbai-embed-xsmall-v1 三种格式启动示例
 
@@ -232,7 +300,7 @@ curl http://localhost:10100/chat/completions \
 
 | 类别 | 模型 |
 |------|------|
-| **文本** | Qwen3, MiniCPM4 |
+| **文本** | Qwen3, MiniCPM4, LFM2.5-350M |
 | **向量** | Qwen3-Embedding, LFM2.5-Embedding-350M, all-MiniLM-L6-v2, mxbai-embed-xsmall-v1 |
 | **视觉** | Qwen2.5-VL, Qwen3-VL |
 | **OCR** | DeepSeek-OCR, Hunyuan-OCR, PaddleOCR-VL |

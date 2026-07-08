@@ -6,7 +6,10 @@ pub mod video_utils;
 
 use std::fs::File;
 use std::io::{Cursor, Read};
-use std::{collections::HashMap, fs, path::PathBuf, process::Command, time::Duration};
+use std::{
+    collections::HashMap, ffi::OsString, fs, path::PathBuf, process::Command, sync::OnceLock,
+    time::Duration,
+};
 
 use aha_openai_dive::v1::resources::{
     chat::{
@@ -29,24 +32,79 @@ use dirs::home_dir;
 use half::{bf16, f16, slice::HalfFloatSliceExt};
 use modelscope::ModelScope;
 use serde_json::{Map, Value};
+use sysinfo::System;
 use tokio::time::sleep;
 use zip::ZipArchive;
 
+static CPU_RAYON_INIT: OnceLock<()> = OnceLock::new();
+
+fn resolve_default_rayon_threads(
+    physical_core_count: Option<usize>,
+    available_parallelism: usize,
+) -> usize {
+    let available_parallelism = available_parallelism.max(1);
+    match physical_core_count {
+        Some(count) if count > 0 => count.min(available_parallelism),
+        _ => available_parallelism,
+    }
+}
+
+fn plan_default_rayon_threads(
+    explicit_env: Option<OsString>,
+    physical_core_count: Option<usize>,
+    available_parallelism: usize,
+) -> Option<usize> {
+    if explicit_env.is_some() {
+        None
+    } else {
+        Some(resolve_default_rayon_threads(
+            physical_core_count,
+            available_parallelism,
+        ))
+    }
+}
+
+fn init_cpu_rayon_pool() {
+    CPU_RAYON_INIT.get_or_init(|| {
+        let physical_core_count = System::new_all().physical_core_count();
+        let available_parallelism = std::thread::available_parallelism()
+            .map(|threads| threads.get())
+            .unwrap_or(1);
+        if let Some(threads) = plan_default_rayon_threads(
+            std::env::var_os("RAYON_NUM_THREADS"),
+            physical_core_count,
+            available_parallelism,
+        ) {
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global();
+        }
+    });
+}
+
+fn cpu_device() -> Device {
+    init_cpu_rayon_pool();
+    Device::Cpu
+}
+
 pub fn get_device(device: Option<&Device>) -> Device {
     match device {
-        Some(d) => d.clone(),
+        Some(device) => match device {
+            Device::Cpu => cpu_device(),
+            _ => device.clone(),
+        },
         None => {
             #[cfg(feature = "cuda")]
             {
-                Device::new_cuda(0).unwrap_or(Device::Cpu)
+                Device::new_cuda(0).unwrap_or_else(|_| cpu_device())
             }
             #[cfg(all(not(feature = "cuda"), feature = "metal"))]
             {
-                Device::new_metal(0).unwrap_or(Device::Cpu)
+                Device::new_metal(0).unwrap_or_else(|_| cpu_device())
             }
             #[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
             {
-                Device::Cpu
+                cpu_device()
             }
         }
     }
@@ -1279,5 +1337,27 @@ mod tests {
         assert!(payload.contains("not-json"));
         assert!(payload.contains("prefix"));
         assert!(payload.contains("suffix"));
+    }
+
+    #[test]
+    fn test_resolve_default_rayon_threads_prefers_physical_core_count() {
+        assert_eq!(resolve_default_rayon_threads(Some(6), 12), 6);
+    }
+
+    #[test]
+    fn test_resolve_default_rayon_threads_falls_back_to_available_parallelism() {
+        assert_eq!(resolve_default_rayon_threads(None, 12), 12);
+        assert_eq!(resolve_default_rayon_threads(Some(0), 12), 12);
+        assert_eq!(resolve_default_rayon_threads(None, 0), 1);
+    }
+
+    #[test]
+    fn test_plan_default_rayon_threads_respects_explicit_env() {
+        assert_eq!(
+            plan_default_rayon_threads(Some(std::ffi::OsString::from("8")), Some(6), 12),
+            None
+        );
+        assert_eq!(plan_default_rayon_threads(None, Some(6), 12), Some(6));
+        assert_eq!(plan_default_rayon_threads(None, None, 12), Some(12));
     }
 }
