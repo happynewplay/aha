@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use aha_openai_dive::v1::resources::chat::{
     ChatCompletionChunkResponse, ChatCompletionParameters, ChatCompletionResponse,
 };
@@ -11,7 +13,12 @@ use crate::{
     chat_template::ChatTemplate,
     models::{
         ArtifactKind, GenerateModel, LoadSpec,
-        lfm2_5::{config::Lfm2_5Config, model::Lfm2_5Model},
+        common::{gguf::load_text_bootstrap_from_gguf, onnx::resolve_tokenizer_dir},
+        lfm2_5::{
+            config::Lfm2_5Config,
+            model::{Lfm2_5Model, resolve_lfm2_5_gguf_file},
+            onnx::Lfm2_5OnnxBackend,
+        },
     },
     tokenizer::TokenizerModel,
     utils::{
@@ -22,16 +29,46 @@ use crate::{
 
 const LFM2_5_IM_END_TOKEN_ID: u32 = 7;
 
+enum Lfm2_5Runtime {
+    Safetensors(Lfm2_5Model),
+    Gguf(Lfm2_5Model),
+    Onnx(Lfm2_5OnnxBackend),
+}
+
 pub struct Lfm2_5GenerateModel<'a> {
     chat_template: ChatTemplate<'a>,
     tokenizer: TokenizerModel,
-    model: Lfm2_5Model,
+    runtime: Lfm2_5Runtime,
     device: Device,
     eos_token_id: u32,
     model_name: String,
 }
 
 impl<'a> Lfm2_5GenerateModel<'a> {
+    fn forward_runtime_logits(
+        runtime: &mut Lfm2_5Runtime,
+        input_ids: &Tensor,
+        seqlen_offset: usize,
+    ) -> Result<Tensor> {
+        let logits = match runtime {
+            Lfm2_5Runtime::Safetensors(model) | Lfm2_5Runtime::Gguf(model) => model
+                .forward(input_ids, seqlen_offset)?
+                .squeeze(0)?
+                .squeeze(0)?,
+            Lfm2_5Runtime::Onnx(_) => {
+                return Err(anyhow!("onnx runtime should use vector input path"));
+            }
+        };
+        logits.to_dtype(DType::F32).map_err(Into::into)
+    }
+
+    fn clear_runtime_cache_inner(runtime: &mut Lfm2_5Runtime) {
+        match runtime {
+            Lfm2_5Runtime::Safetensors(model) | Lfm2_5Runtime::Gguf(model) => model.clear_cache(),
+            Lfm2_5Runtime::Onnx(backend) => backend.clear_cache(),
+        }
+    }
+
     pub fn init_from_spec(
         spec: &LoadSpec,
         device: Option<&Device>,
@@ -44,8 +81,22 @@ impl<'a> Lfm2_5GenerateModel<'a> {
                 })?;
                 Self::init(path, device, dtype)
             }
-            ArtifactKind::Gguf => Err(anyhow!("lfm2.5-350m gguf runtime is not implemented yet")),
-            ArtifactKind::Onnx => Err(anyhow!("lfm2.5-350m onnx runtime is not implemented yet")),
+            ArtifactKind::Gguf => {
+                let path = spec
+                    .paths
+                    .gguf_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("gguf_path is required for lfm2.5-350m gguf"))?;
+                Self::init_from_gguf(path, spec.paths.tokenizer_dir.as_deref(), device, dtype)
+            }
+            ArtifactKind::Onnx => {
+                let onnx_path = spec
+                    .paths
+                    .onnx_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("onnx_path is required for lfm2.5-350m onnx"))?;
+                Self::init_from_onnx(onnx_path, spec.paths.tokenizer_dir.as_deref())
+            }
             ArtifactKind::Auto => unreachable!("artifact kind should be resolved before init"),
         }
     }
@@ -67,16 +118,210 @@ impl<'a> Lfm2_5GenerateModel<'a> {
         Ok(Self {
             chat_template,
             tokenizer,
-            model,
+            runtime: Lfm2_5Runtime::Safetensors(model),
             device,
             eos_token_id: cfg.eos_token_id,
             model_name: "lfm2.5-350m".to_string(),
         })
     }
+
+    pub fn init_from_gguf(
+        gguf_path: &str,
+        tokenizer_dir: Option<&str>,
+        device: Option<&Device>,
+        dtype: Option<DType>,
+    ) -> Result<Self> {
+        let model_file = resolve_lfm2_5_gguf_file(gguf_path)?;
+        let device = get_device(device);
+        let dtype = dtype.unwrap_or(DType::F32);
+        let bootstrap =
+            load_text_bootstrap_from_gguf(&model_file, Some(false), Some(false), Some(false))?;
+        let chat_template = if let Some(dir) = tokenizer_dir {
+            ChatTemplate::init(dir)?
+        } else if let Some(chat_template_str) = bootstrap.chat_template {
+            ChatTemplate::str_init(&chat_template_str)?
+        } else {
+            let parent = Path::new(&model_file)
+                .parent()
+                .and_then(|path| path.to_str())
+                .ok_or_else(|| anyhow!("cannot resolve gguf parent directory for {model_file}"))?;
+            ChatTemplate::init(parent)?
+        };
+        let cfg_path = if let Some(dir) = tokenizer_dir {
+            Path::new(dir).join("config.json")
+        } else {
+            Path::new(&model_file)
+                .parent()
+                .ok_or_else(|| anyhow!("cannot resolve gguf parent directory for {model_file}"))?
+                .join("config.json")
+        };
+        let cfg: Lfm2_5Config = serde_json::from_slice(&std::fs::read(cfg_path)?)?;
+        let eos_token_id = bootstrap.eos_token_id.unwrap_or(cfg.eos_token_id);
+        let model = Lfm2_5Model::new_from_gguf(&model_file, &cfg, &device, dtype)?;
+        let model_name = Path::new(&model_file)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("lfm2.5-350m")
+            .to_string();
+
+        Ok(Self {
+            chat_template,
+            tokenizer: bootstrap.tokenizer,
+            runtime: Lfm2_5Runtime::Gguf(model),
+            device,
+            eos_token_id,
+            model_name,
+        })
+    }
+
+    pub fn init_from_onnx(onnx_path: &str, tokenizer_dir: Option<&str>) -> Result<Self> {
+        let tokenizer_dir = resolve_tokenizer_dir(
+            onnx_path,
+            tokenizer_dir,
+            &["tokenizer.json", "config.json", "chat_template.jinja"],
+        )?;
+        let base_path = tokenizer_dir.to_string_lossy().to_string();
+        let chat_template = ChatTemplate::init(&base_path)?;
+        let tokenizer = TokenizerModel::init(&base_path)?;
+        let cfg: Lfm2_5Config =
+            serde_json::from_slice(&std::fs::read(tokenizer_dir.join("config.json"))?)?;
+        let model_name = tokenizer_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("lfm2.5-350m")
+            .to_string();
+        let backend = Lfm2_5OnnxBackend::load(onnx_path)?;
+
+        Ok(Self {
+            chat_template,
+            tokenizer,
+            runtime: Lfm2_5Runtime::Onnx(backend),
+            device: Device::Cpu,
+            eos_token_id: cfg.eos_token_id,
+            model_name,
+        })
+    }
+
+    fn forward_logits(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
+        Self::forward_runtime_logits(&mut self.runtime, input_ids, seqlen_offset)
+    }
+
+    fn clear_runtime_cache(&mut self) {
+        Self::clear_runtime_cache_inner(&mut self.runtime);
+    }
+
+    fn generate_with_onnx(&mut self, mes: ChatCompletionParameters) -> Result<ChatCompletionResponse> {
+        let seed = mes.seed.unwrap_or(34562) as u64;
+        let mut logit_processor = get_logit_processor(mes.temperature, mes.top_p, None, seed);
+        let mes_render = self.chat_template.apply_chat_template(&mes)?;
+        let mut current_ids = self.tokenizer.text_encode_vec(mes_render, true)?;
+        let prompt_tokens = current_ids.len() as u32;
+        let mut position_start = 0usize;
+        let mut generate = Vec::new();
+        let sample_len = mes.max_tokens.unwrap_or(2048);
+        let onnx_backend = match &mut self.runtime {
+            Lfm2_5Runtime::Onnx(backend) => backend,
+            _ => return Err(anyhow!("lfm2.5 onnx runtime is not initialized")),
+        };
+        for _ in 0..sample_len {
+            let logits = onnx_backend.forward_logits(&current_ids, position_start)?;
+            let vocab_size = logits.len();
+            let logits = Tensor::from_vec(logits, vocab_size, &self.device)?;
+            let next_token = logit_processor.sample(&logits)?;
+            generate.push(next_token);
+            if next_token == self.eos_token_id {
+                break;
+            }
+            position_start += current_ids.len();
+            current_ids = vec![next_token];
+        }
+        let num_token = generate.len() as u32;
+        let res = decode_tokens_for_completion(&self.tokenizer, &generate, self.eos_token_id)?;
+        onnx_backend.clear_cache();
+        Ok(build_completion_response(
+            res,
+            &self.model_name,
+            Some(num_token),
+            Some(prompt_tokens),
+        ))
+    }
+
+    fn generate_stream_with_onnx(
+        &mut self,
+        mes: ChatCompletionParameters,
+    ) -> Result<
+        Box<
+            dyn Stream<Item = Result<ChatCompletionChunkResponse, anyhow::Error>>
+                + Send
+                + Unpin
+                + '_,
+        >,
+    > {
+        let seed = mes.seed.unwrap_or(34562) as u64;
+        let mut logit_processor = get_logit_processor(mes.temperature, mes.top_p, None, seed);
+        let mes_render = self.chat_template.apply_chat_template(&mes)?;
+        let tokenizer = &self.tokenizer;
+        let model_name = self.model_name.clone();
+        let eos_token_id = self.eos_token_id;
+        let device = self.device.clone();
+        let mut current_ids = tokenizer.text_encode_vec(mes_render, true)?;
+        let mut position_start = 0usize;
+        let sample_len = mes.max_tokens.unwrap_or(512);
+        let onnx_backend = match &mut self.runtime {
+            Lfm2_5Runtime::Onnx(backend) => backend,
+            _ => return Err(anyhow!("lfm2.5 onnx runtime is not initialized")),
+        };
+
+        let stream = stream! {
+            let mut error_tokens = Vec::new();
+            let mut stream_state = Lfm2_5StreamState::default();
+            for _ in 0..sample_len {
+                let logits = onnx_backend.forward_logits(&current_ids, position_start)?;
+                let vocab_size = logits.len();
+                let logits = Tensor::from_vec(logits, vocab_size, &device)?;
+                let next_token = logit_processor.sample(&logits)?;
+                if eos_token_id == LFM2_5_IM_END_TOKEN_ID && next_token == eos_token_id {
+                    break;
+                }
+                let mut decode_ids = Vec::new();
+                if !error_tokens.is_empty() {
+                    decode_ids.extend_from_slice(&error_tokens);
+                }
+                decode_ids.push(next_token);
+                let decoded_token = tokenizer
+                    .token_decode_with_special_tokens(decode_ids)
+                    .map_err(|e| anyhow!(format!("stream decode error{e}")))?;
+                if decoded_token.contains('�') {
+                    error_tokens.push(next_token);
+                    if error_tokens.len() > 3 {
+                        error_tokens.clear();
+                    }
+                    position_start += current_ids.len();
+                    current_ids = vec![next_token];
+                    continue;
+                }
+                error_tokens.clear();
+                if let Some(chunk) = stream_state.push(&decoded_token, &model_name)? {
+                    yield Ok(chunk);
+                }
+                position_start += current_ids.len();
+                current_ids = vec![next_token];
+                if next_token == eos_token_id {
+                    break;
+                }
+            }
+            onnx_backend.clear_cache();
+        };
+        Ok(Box::new(Box::pin(stream)))
+    }
 }
 
 impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
     fn generate(&mut self, mes: ChatCompletionParameters) -> Result<ChatCompletionResponse> {
+        if matches!(&self.runtime, Lfm2_5Runtime::Onnx(_)) {
+            return self.generate_with_onnx(mes);
+        }
+
         let seed = mes.seed.unwrap_or(34562) as u64;
         let mut logit_processor = get_logit_processor(mes.temperature, mes.top_p, None, seed);
         let mes_render = self.chat_template.apply_chat_template(&mes)?;
@@ -88,8 +333,7 @@ impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
         let sample_len = mes.max_tokens.unwrap_or(2048);
 
         for _ in 0..sample_len {
-            let logits = self.model.forward(&input_ids, seqlen_offset)?;
-            let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+            let logits = self.forward_logits(&input_ids, seqlen_offset)?;
             let next_token = logit_processor.sample(&logits)?;
             generate.push(next_token);
             if next_token == self.eos_token_id {
@@ -102,7 +346,7 @@ impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
 
         let num_token = generate.len() as u32;
         let res = decode_tokens_for_completion(&self.tokenizer, &generate, self.eos_token_id)?;
-        self.model.clear_cache();
+        self.clear_runtime_cache();
         Ok(build_completion_response(
             res,
             &self.model_name,
@@ -122,6 +366,10 @@ impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
                 + '_,
         >,
     > {
+        if matches!(&self.runtime, Lfm2_5Runtime::Onnx(_)) {
+            return self.generate_stream_with_onnx(mes);
+        }
+
         let seed = mes.seed.unwrap_or(34562) as u64;
         let mut logit_processor = get_logit_processor(mes.temperature, mes.top_p, None, seed);
         let mes_render = self.chat_template.apply_chat_template(&mes)?;
@@ -133,14 +381,13 @@ impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
         let tokenizer = &self.tokenizer;
         let device = self.device.clone();
         let eos_token_id = self.eos_token_id;
-        let model = &mut self.model;
+        let runtime = &mut self.runtime;
 
         let stream = stream! {
             let mut error_tokens = Vec::new();
             let mut stream_state = Lfm2_5StreamState::default();
             for _ in 0..sample_len {
-                let logits = model.forward(&input_ids, seqlen_offset)?;
-                let logits = logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+                let logits = Self::forward_runtime_logits(runtime, &input_ids, seqlen_offset)?;
                 let next_token = logit_processor.sample(&logits)?;
                 if eos_token_id == LFM2_5_IM_END_TOKEN_ID && next_token == eos_token_id {
                     break;
@@ -174,7 +421,7 @@ impl<'a> GenerateModel for Lfm2_5GenerateModel<'a> {
                     break;
                 }
             }
-            model.clear_cache();
+            Self::clear_runtime_cache_inner(runtime);
         };
         Ok(Box::new(Box::pin(stream)))
     }

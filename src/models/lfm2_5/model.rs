@@ -1,11 +1,13 @@
+use std::{collections::HashMap, path::Path};
+
 use anyhow::{Result, anyhow};
-use candle_core::{D, Tensor};
+use candle_core::{D, DType, Device, Tensor};
 use candle_nn::{
     Conv1d, Embedding, Linear, Module, RmsNorm, VarBuilder, embedding, linear_no_bias, rms_norm,
 };
 
 use crate::{
-    models::common::{conv1d_depthwise, eager_attention_forward, get_conv1d},
+    models::common::{conv1d_depthwise, eager_attention_forward, get_conv1d, gguf::load_gguf_file},
     position_embed::rope::{RoPE, apply_rotary_pos_emb},
 };
 
@@ -436,6 +438,262 @@ impl Lfm2_5Model {
     pub fn clear_cache(&mut self) {
         self.language_model.clear_cache();
     }
+
+    pub fn new_from_gguf(
+        model_file: &str,
+        cfg: &Lfm2_5Config,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let mut gguf = load_gguf_file(resolve_lfm2_5_gguf_file(model_file)?.as_ref(), device)?;
+        let tensors = load_lfm2_5_gguf_tensors(&mut gguf, cfg, device, dtype)?;
+        let vb = VarBuilder::from_tensors(tensors, dtype, device);
+        Self::new_from_vb(vb, cfg)
+    }
+}
+
+pub(super) fn resolve_lfm2_5_gguf_file(path: &str) -> Result<String> {
+    let model_path = Path::new(path);
+    if !model_path.exists() {
+        return Err(anyhow!("gguf model path not found: {}", path));
+    }
+    if model_path.is_file() {
+        if model_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            return Ok(model_path.to_string_lossy().to_string());
+        }
+        return Err(anyhow!(
+            "gguf model path does not point to a .gguf file: {}",
+            path
+        ));
+    }
+
+    let mut matches = std::fs::read_dir(model_path)?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate.is_file()
+                && candidate
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
+        .into_iter()
+        .next()
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow!("no .gguf file found in {}", model_path.display()))
+}
+
+fn load_lfm2_5_gguf_tensors<R: std::io::Read + std::io::Seek>(
+    gguf: &mut crate::models::common::gguf::Gguf<R>,
+    cfg: &Lfm2_5Config,
+    device: &Device,
+    dtype: DType,
+) -> Result<HashMap<String, Tensor>> {
+    let mut tensors = HashMap::new();
+
+    insert_gguf_tensor(
+        gguf,
+        &mut tensors,
+        "token_embd.weight",
+        "model.embed_tokens.weight",
+        device,
+        dtype,
+    )?;
+    insert_gguf_tensor(
+        gguf,
+        &mut tensors,
+        "token_embd_norm.weight",
+        "model.embedding_norm.weight",
+        device,
+        dtype,
+    )?;
+
+    for (layer_idx, layer_type) in cfg.layer_types.iter().enumerate() {
+        insert_gguf_tensor(
+            gguf,
+            &mut tensors,
+            &format!("blk.{layer_idx}.attn_norm.weight"),
+            &format!("model.layers.{layer_idx}.operator_norm.weight"),
+            device,
+            dtype,
+        )?;
+        insert_gguf_tensor(
+            gguf,
+            &mut tensors,
+            &format!("blk.{layer_idx}.ffn_norm.weight"),
+            &format!("model.layers.{layer_idx}.ffn_norm.weight"),
+            device,
+            dtype,
+        )?;
+        insert_gguf_tensor(
+            gguf,
+            &mut tensors,
+            &format!("blk.{layer_idx}.ffn_gate.weight"),
+            &format!("model.layers.{layer_idx}.feed_forward.w1.weight"),
+            device,
+            dtype,
+        )?;
+        insert_gguf_tensor(
+            gguf,
+            &mut tensors,
+            &format!("blk.{layer_idx}.ffn_down.weight"),
+            &format!("model.layers.{layer_idx}.feed_forward.w2.weight"),
+            device,
+            dtype,
+        )?;
+        insert_gguf_tensor(
+            gguf,
+            &mut tensors,
+            &format!("blk.{layer_idx}.ffn_up.weight"),
+            &format!("model.layers.{layer_idx}.feed_forward.w3.weight"),
+            device,
+            dtype,
+        )?;
+
+        match layer_type.as_str() {
+            "conv" => {
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.shortconv.in_proj.weight"),
+                    &format!("model.layers.{layer_idx}.conv.in_proj.weight"),
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_conv_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.shortconv.conv.weight"),
+                    &format!("model.layers.{layer_idx}.conv.conv.weight"),
+                    cfg.hidden_size,
+                    cfg.conv_l_cache,
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.shortconv.out_proj.weight"),
+                    &format!("model.layers.{layer_idx}.conv.out_proj.weight"),
+                    device,
+                    dtype,
+                )?;
+            }
+            "full_attention" => {
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.attn_q.weight"),
+                    &format!("model.layers.{layer_idx}.self_attn.q_proj.weight"),
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.attn_k.weight"),
+                    &format!("model.layers.{layer_idx}.self_attn.k_proj.weight"),
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.attn_v.weight"),
+                    &format!("model.layers.{layer_idx}.self_attn.v_proj.weight"),
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.attn_output.weight"),
+                    &format!("model.layers.{layer_idx}.self_attn.out_proj.weight"),
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.attn_q_norm.weight"),
+                    &format!("model.layers.{layer_idx}.self_attn.q_layernorm.weight"),
+                    device,
+                    dtype,
+                )?;
+                insert_gguf_tensor(
+                    gguf,
+                    &mut tensors,
+                    &format!("blk.{layer_idx}.attn_k_norm.weight"),
+                    &format!("model.layers.{layer_idx}.self_attn.k_layernorm.weight"),
+                    device,
+                    dtype,
+                )?;
+            }
+            other => return Err(anyhow!("unsupported lfm2.5 gguf layer type: {other}")),
+        }
+    }
+
+    if !cfg.tie_embedding && gguf.has_tensor("output.weight") {
+        insert_gguf_tensor(
+            gguf,
+            &mut tensors,
+            "output.weight",
+            "lm_head.weight",
+            device,
+            dtype,
+        )?;
+    }
+
+    Ok(tensors)
+}
+
+fn insert_gguf_tensor<R: std::io::Read + std::io::Seek>(
+    gguf: &mut crate::models::common::gguf::Gguf<R>,
+    tensors: &mut HashMap<String, Tensor>,
+    gguf_name: &str,
+    target_name: &str,
+    device: &Device,
+    dtype: DType,
+) -> Result<()> {
+    let tensor = gguf
+        .get_dequantized(gguf_name)
+        .map_err(|err| anyhow!("failed to load gguf tensor {}: {}", gguf_name, err))?
+        .to_device(device)
+        .map_err(|err| anyhow!("failed to move gguf tensor {}: {}", gguf_name, err))?;
+    let tensor = tensor
+        .to_dtype(dtype)
+        .map_err(|err| anyhow!("failed to convert gguf tensor {}: {}", gguf_name, err))?;
+    tensors.insert(target_name.to_string(), tensor);
+    Ok(())
+}
+
+fn insert_gguf_conv_tensor<R: std::io::Read + std::io::Seek>(
+    gguf: &mut crate::models::common::gguf::Gguf<R>,
+    tensors: &mut HashMap<String, Tensor>,
+    gguf_name: &str,
+    target_name: &str,
+    hidden_size: usize,
+    kernel_size: usize,
+    device: &Device,
+    dtype: DType,
+) -> Result<()> {
+    let tensor = gguf
+        .get_dequantized(gguf_name)
+        .map_err(|err| anyhow!("failed to load gguf tensor {}: {}", gguf_name, err))?
+        .reshape((hidden_size, 1, kernel_size))
+        .map_err(|err| anyhow!("failed to reshape gguf tensor {}: {}", gguf_name, err))?
+        .to_device(device)
+        .map_err(|err| anyhow!("failed to move gguf tensor {}: {}", gguf_name, err))?;
+    let tensor = tensor
+        .to_dtype(dtype)
+        .map_err(|err| anyhow!("failed to convert gguf tensor {}: {}", gguf_name, err))?;
+    tensors.insert(target_name.to_string(), tensor);
+    Ok(())
 }
 
 #[cfg(test)]

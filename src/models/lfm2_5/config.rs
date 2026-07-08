@@ -1,5 +1,21 @@
 use serde::Deserialize;
 
+fn default_false() -> bool {
+    false
+}
+
+fn default_zero_usize() -> usize {
+    0
+}
+
+fn default_one_f32() -> f32 {
+    1.0
+}
+
+fn default_zero_f64() -> f64 {
+    0.0
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RopeParameters {
     pub rope_theta: f32,
@@ -11,21 +27,33 @@ pub struct Lfm2_5Config {
     pub architectures: Vec<String>,
     pub model_type: String,
     pub dtype: String,
+    #[serde(default = "default_false")]
     pub block_auto_adjust_ff_dim: bool,
+    #[serde(default = "default_zero_usize")]
     pub block_dim: usize,
+    #[serde(default = "default_zero_usize")]
     pub block_ff_dim: usize,
+    #[serde(default = "default_one_f32")]
     pub block_ffn_dim_multiplier: f32,
+    #[serde(default = "default_one_f32")]
     pub block_mlp_init_scale: f32,
+    #[serde(default = "default_zero_usize")]
     pub block_multiple_of: usize,
+    #[serde(default = "default_zero_f64")]
     pub block_norm_eps: f64,
+    #[serde(default = "default_one_f32")]
     pub block_out_init_scale: f32,
+    #[serde(default = "default_false")]
     pub block_use_swiglu: bool,
+    #[serde(default = "default_false")]
     pub block_use_xavier_init: bool,
     pub bos_token_id: u32,
     #[serde(rename = "conv_L_cache")]
     pub conv_l_cache: usize,
     pub conv_bias: bool,
+    #[serde(default = "default_zero_usize")]
     pub conv_dim: usize,
+    #[serde(default = "default_false")]
     pub conv_use_xavier_init: bool,
     pub eos_token_id: u32,
     pub hidden_size: usize,
@@ -38,6 +66,7 @@ pub struct Lfm2_5Config {
     pub norm_eps: f64,
     pub pad_token_id: u32,
     pub rope_parameters: RopeParameters,
+    #[serde(alias = "tie_word_embeddings")]
     pub tie_embedding: bool,
     pub use_cache: bool,
     pub use_pos_enc: bool,
