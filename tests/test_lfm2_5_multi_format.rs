@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use aha::models::{
     ArtifactKind, GenerateModel, LoadSpec, ModelPaths, WhichModel,
-    common::onnx::ensure_ort_dylib_path,
-    lfm2_5::generate::Lfm2_5GenerateModel,
+    common::onnx::ensure_ort_dylib_path, lfm2_5::generate::Lfm2_5GenerateModel,
 };
 use aha_openai_dive::v1::resources::chat::ChatCompletionParameters;
 use anyhow::{Context, Result, anyhow};

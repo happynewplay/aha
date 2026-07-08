@@ -210,7 +210,10 @@ impl<'a> Lfm2_5GenerateModel<'a> {
         Self::clear_runtime_cache_inner(&mut self.runtime);
     }
 
-    fn generate_with_onnx(&mut self, mes: ChatCompletionParameters) -> Result<ChatCompletionResponse> {
+    fn generate_with_onnx(
+        &mut self,
+        mes: ChatCompletionParameters,
+    ) -> Result<ChatCompletionResponse> {
         let seed = mes.seed.unwrap_or(34562) as u64;
         let mut logit_processor = get_logit_processor(mes.temperature, mes.top_p, None, seed);
         let mes_render = self.chat_template.apply_chat_template(&mes)?;

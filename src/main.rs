@@ -7,6 +7,7 @@ use aha::{
         default_artifact,
     },
     process::{cleanup_pid_file, create_pid_file},
+    tokenizer::set_global_max_context_length,
     utils::{download_model, get_default_save_dir},
 };
 use anyhow::anyhow;
@@ -69,6 +70,10 @@ struct Cli {
     #[arg(long)]
     artifact_format: Option<ArtifactArg>,
 
+    /// Maximum input context length in tokens for the current process
+    #[arg(long, value_parser = parse_positive_usize)]
+    max_context_length: Option<usize>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -125,6 +130,15 @@ impl From<RunEmbeddingPromptArg> for aha::models::EmbeddingPromptName {
     }
 }
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value.parse::<usize>().map_err(|err| err.to_string())?;
+    if parsed == 0 {
+        Err("value must be greater than 0".to_string())
+    } else {
+        Ok(parsed)
+    }
+}
+
 /// Common/shared arguments for server operations
 #[derive(Args, Debug)]
 struct CommonArgs {
@@ -139,6 +153,10 @@ struct CommonArgs {
     /// Model type (required)
     #[arg(short, long)]
     model: WhichModel,
+
+    /// Maximum input context length in tokens for the current process
+    #[arg(long, value_parser = parse_positive_usize)]
+    max_context_length: Option<usize>,
 
     /// Allow remote shutdown requests (default: local only, use with caution)
     #[arg(long)]
@@ -261,6 +279,10 @@ struct RunArgs {
     /// Maximum number of tokens to generate
     #[arg(long)]
     max_tokens: Option<u32>,
+
+    /// Maximum input context length in tokens for the current process
+    #[arg(long, value_parser = parse_positive_usize)]
+    max_context_length: Option<usize>,
 
     /// Embedding prompt name for embedding-capable models
     #[arg(long = "prompt-name")]
@@ -669,6 +691,7 @@ async fn run_cli(args: CliArgs) -> anyhow::Result<()> {
         tokenizer_dir,
         artifact_format,
     } = args;
+    set_global_max_context_length(common.max_context_length);
     let spec = resolve_load_spec_for_server(
         common.model,
         weight_path,
@@ -700,6 +723,7 @@ async fn run_serv(args: ServArgs) -> anyhow::Result<()> {
         tokenizer_dir,
         artifact_format,
     } = args;
+    set_global_max_context_length(common.max_context_length);
     let spec = resolve_load_spec_for_server(
         common.model,
         weight_path,
@@ -791,6 +815,7 @@ async fn run_download(args: DownloadArgs) -> anyhow::Result<()> {
 fn run_run(args: RunArgs) -> anyhow::Result<()> {
     use aha::exec::ExecModel;
 
+    set_global_max_context_length(args.max_context_length);
     let spec = resolve_load_spec_for_run(&args)?;
     if run_target_model_with_spec(&args, &spec)? {
         return Ok(());
@@ -1055,6 +1080,7 @@ async fn main() -> anyhow::Result<()> {
                     address: cli.address.unwrap_or_else(|| "127.0.0.1".to_string()),
                     port: cli.port.unwrap_or(10100),
                     model,
+                    max_context_length: cli.max_context_length,
                     allow_remote_shutdown: false,
                 },
                 weight_path: cli.weight_path,
@@ -1146,6 +1172,76 @@ pub(crate) async fn start_http_server(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parse_run_accepts_max_context_length() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "qwen3-0.6b",
+            "--input",
+            "hello",
+            "--max-context-length",
+            "1024",
+        ])
+        .expect("run args should parse");
+
+        let Some(Commands::Run(args)) = cli.command else {
+            panic!("expected run subcommand");
+        };
+        assert_eq!(args.max_context_length, Some(1024));
+    }
+
+    #[test]
+    fn parse_serv_accepts_max_context_length() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "serv",
+            "--model",
+            "qwen3-0.6b",
+            "--max-context-length",
+            "1024",
+        ])
+        .expect("serv args should parse");
+
+        let Some(Commands::Serv(args)) = cli.command else {
+            panic!("expected serv subcommand");
+        };
+        assert_eq!(args.common.max_context_length, Some(1024));
+    }
+
+    #[test]
+    fn parse_root_accepts_max_context_length() {
+        let cli = Cli::try_parse_from([
+            "aha",
+            "--model",
+            "qwen3-0.6b",
+            "--max-context-length",
+            "1024",
+        ])
+        .expect("root args should parse");
+
+        assert!(cli.command.is_none());
+        assert_eq!(cli.max_context_length, Some(1024));
+    }
+
+    #[test]
+    fn parse_max_context_length_rejects_zero() {
+        let err = Cli::try_parse_from([
+            "aha",
+            "run",
+            "--model",
+            "qwen3-0.6b",
+            "--input",
+            "hello",
+            "--max-context-length",
+            "0",
+        ])
+        .expect_err("zero should be rejected");
+
+        assert!(err.to_string().contains("value must be greater than 0"));
+    }
 
     #[test]
     fn parse_run_onnx_flags() {

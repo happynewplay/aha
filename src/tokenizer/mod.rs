@@ -2,10 +2,41 @@ use anyhow::{Result, anyhow};
 use candle_core::{Device, Tensor};
 use sentencepiece::SentencePieceProcessor;
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokenizers::{
     AddedToken, Tokenizer, decoders::byte_level::ByteLevel as ByteLevelDecoder, models::bpe::BPE,
     pre_tokenizers::byte_level::ByteLevel,
 };
+
+static GLOBAL_MAX_CONTEXT_LENGTH: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_global_max_context_length(max_context_length: Option<usize>) {
+    GLOBAL_MAX_CONTEXT_LENGTH.store(max_context_length.unwrap_or(0), Ordering::Relaxed);
+}
+
+fn global_max_context_length() -> Option<usize> {
+    match GLOBAL_MAX_CONTEXT_LENGTH.load(Ordering::Relaxed) {
+        0 => None,
+        value => Some(value),
+    }
+}
+
+fn truncate_token_ids_to_length(
+    mut token_ids: Vec<u32>,
+    max_context_length: Option<usize>,
+) -> Vec<u32> {
+    if let Some(max_context_length) = max_context_length
+        && token_ids.len() > max_context_length
+    {
+        // Keep the most recent tokens so overlong prompts preserve the latest turns.
+        token_ids = token_ids.split_off(token_ids.len() - max_context_length);
+    }
+    token_ids
+}
+
+fn apply_global_max_context_length(token_ids: Vec<u32>) -> Vec<u32> {
+    truncate_token_ids_to_length(token_ids, global_max_context_length())
+}
 
 pub struct TokenizerModel {
     pub tokenizer: Tokenizer,
@@ -95,7 +126,7 @@ impl TokenizerModel {
             .map_err(|e| anyhow!(format!("tokenizer encode error: {}", e)))?
             .get_ids()
             .to_vec();
-        Ok(token_id)
+        Ok(apply_global_max_context_length(token_id))
     }
     pub fn text_encode(&self, text: String, device: &Device) -> Result<Tensor> {
         let token_id = self.text_encode_vec(text, true)?;
@@ -128,7 +159,53 @@ pub fn sentencepiece_encode(
     let tokens = tokenizer
         .encode(text)
         .map_err(|e| anyhow!(format!("tokenizer encode error:{}", e)))?;
-    let token_ids = tokens.iter().map(|p| p.id).collect::<Vec<u32>>();
+    let token_ids =
+        apply_global_max_context_length(tokens.iter().map(|p| p.id).collect::<Vec<u32>>());
     let tokens_t = Tensor::new(token_ids, device)?.unsqueeze(0)?;
     Ok(tokens_t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TokenizerModel, set_global_max_context_length, truncate_token_ids_to_length};
+    use ahash::AHashMap;
+    use tokenizers::{
+        Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace,
+    };
+
+    fn build_test_tokenizer() -> TokenizerModel {
+        let vocab = AHashMap::from([
+            ("[UNK]".to_string(), 0),
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+            ("d".to_string(), 4),
+        ]);
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_string())
+            .build()
+            .expect("word level tokenizer should build");
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
+        TokenizerModel::new(tokenizer)
+    }
+
+    #[test]
+    fn truncate_token_ids_to_length_keeps_latest_tokens() {
+        let token_ids = vec![1, 2, 3, 4];
+        let truncated = truncate_token_ids_to_length(token_ids, Some(2));
+        assert_eq!(truncated, vec![3, 4]);
+    }
+
+    #[test]
+    fn text_encode_vec_applies_global_max_context_length() {
+        let tokenizer = build_test_tokenizer();
+        set_global_max_context_length(Some(2));
+        let token_ids = tokenizer
+            .text_encode_vec("a b c d".to_string(), false)
+            .expect("tokenizer should encode whitespace separated tokens");
+        set_global_max_context_length(None);
+        assert_eq!(token_ids, vec![3, 4]);
+    }
 }

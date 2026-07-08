@@ -217,17 +217,19 @@ fn configure_session_builder(
 ) -> Result<ort::session::builder::SessionBuilder> {
     builder = builder
         .with_optimization_level(optimization_level)
-        .map_err(|err| anyhow!("failed to set ONNX optimization level {optimization_level:?}: {err}"))?;
+        .map_err(|err| {
+            anyhow!("failed to set ONNX optimization level {optimization_level:?}: {err}")
+        })?;
     if let Some(cfg) = cfg {
         if let Some(intra_threads) = cfg.intra_threads {
-            builder = builder
-                .with_intra_threads(intra_threads)
-                .map_err(|err| anyhow!("failed to set ONNX intra threads to {intra_threads}: {err}"))?;
+            builder = builder.with_intra_threads(intra_threads).map_err(|err| {
+                anyhow!("failed to set ONNX intra threads to {intra_threads}: {err}")
+            })?;
         }
         if let Some(inter_threads) = cfg.inter_threads {
-            builder = builder
-                .with_inter_threads(inter_threads)
-                .map_err(|err| anyhow!("failed to set ONNX inter threads to {inter_threads}: {err}"))?;
+            builder = builder.with_inter_threads(inter_threads).map_err(|err| {
+                anyhow!("failed to set ONNX inter threads to {inter_threads}: {err}")
+            })?;
         }
     }
     Ok(builder)

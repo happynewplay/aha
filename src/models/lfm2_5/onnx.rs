@@ -144,7 +144,8 @@ impl Lfm2_5OnnxBackend {
 
         let mut inputs = Vec::with_capacity(self.input_descriptors.len());
         for desc in &self.input_descriptors {
-            let value = self.build_input_value(desc, &input_ids_i64, &attention_mask, position_start)?;
+            let value =
+                self.build_input_value(desc, &input_ids_i64, &attention_mask, position_start)?;
             inputs.push((desc.name.clone(), value));
         }
 
@@ -174,7 +175,8 @@ impl Lfm2_5OnnxBackend {
 
         let mut new_cache = Vec::new();
         for input_name in &self.cache_input_names {
-            let Some(output_name) = resolve_present_output_name(input_name, &self.output_names) else {
+            let Some(output_name) = resolve_present_output_name(input_name, &self.output_names)
+            else {
                 continue;
             };
             let Some(output_value) = outputs.get(&output_name) else {
@@ -352,12 +354,9 @@ impl Lfm2_5OnnxBackend {
         shape: Vec<i64>,
         position_start: i64,
     ) -> Result<ort::value::DynValue> {
-        let kind = desc.kind.ok_or_else(|| {
-            anyhow!(
-                "unsupported lfm2.5 onnx input dtype for {}",
-                desc.name
-            )
-        })?;
+        let kind = desc
+            .kind
+            .ok_or_else(|| anyhow!("unsupported lfm2.5 onnx input dtype for {}", desc.name))?;
         let elem_count = shape.iter().try_fold(1_usize, |acc, dim| {
             if *dim < 0 {
                 Err(anyhow!(
@@ -375,10 +374,11 @@ impl Lfm2_5OnnxBackend {
                 vec![position_start as i32; elem_count],
             ))?
             .into_dyn()),
-            OnnxTensorKind::I64 => {
-                Ok(ort::value::Tensor::from_array((shape, vec![position_start; elem_count]))?
-                    .into_dyn())
-            }
+            OnnxTensorKind::I64 => Ok(ort::value::Tensor::from_array((
+                shape,
+                vec![position_start; elem_count],
+            ))?
+            .into_dyn()),
             _ => Err(anyhow!(
                 "unsupported past_sequence_length dtype for lfm2.5 onnx input {}",
                 desc.name

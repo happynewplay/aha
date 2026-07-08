@@ -210,7 +210,7 @@ aha serv -m lfm2.5-350m --weight-path D:\model_download\LFM2.5-350M
 aha serv -m lfm2.5-350m --artifact-format gguf --gguf-path D:\model_download\LFM2.5-350M-GGUF\LFM2.5-350M-Q8_0.gguf --tokenizer-dir D:\model_download\LFM2.5-350M
 
 # 3. ONNX
-aha serv -m lfm2.5-350m --artifact-format onnx --onnx-path D:\model_download\LFM2.5-350M-ONNX\onnx\model_q4f16.onnx --tokenizer-dir D:\model_download\LFM2.5-350M-ONNX
+aha serv -m lfm2.5-350m --artifact-format onnx --onnx-path D:\model_download\LFM2.5-350M-ONNX\onnx\model_q4f16.onnx --tokenizer-dir D:\model_download\LFM2.5-350M-ONNX --max-context-length 64000
 ```
 
 如果你希望自行控制 `messages`、`max_tokens`、`temperature` 等参数，可以把完整请求写入 JSON 文件，再通过 `--request-json` 传入：
