@@ -1,4 +1,4 @@
-//! LFM2.5-350M exec implementation for CLI `run` subcommand
+//! LFM2.5 exec implementation for CLI `run` subcommand
 
 use std::path::Path;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use crate::utils::get_file_path;
 pub struct Lfm2_5Exec;
 
 impl Lfm2_5Exec {
-    fn build_text_request(input: &[String]) -> Result<ChatCompletionParameters> {
+    fn build_text_request(input: &[String], model_id: &str) -> Result<ChatCompletionParameters> {
         let input_text = input.first().ok_or_else(|| {
             anyhow!("lfm2.5 run requires one text input unless --request-json is provided")
         })?;
@@ -25,7 +25,7 @@ impl Lfm2_5Exec {
         };
 
         Ok(serde_json::from_value(serde_json::json!({
-            "model": "lfm2.5-350m",
+            "model": model_id,
             "messages": [
                 {
                     "role": "user",
@@ -58,11 +58,12 @@ impl Lfm2_5Exec {
     fn build_request(
         input: &[String],
         request_json: Option<&str>,
+        model_id: &str,
     ) -> Result<ChatCompletionParameters> {
         if let Some(path) = request_json {
             Self::load_request_json(path)
         } else {
-            Self::build_text_request(input)
+            Self::build_text_request(input, model_id)
         }
     }
 
@@ -77,7 +78,7 @@ impl Lfm2_5Exec {
         let i_duration = i_start.elapsed();
         println!("Time elapsed in load model is: {:?}", i_duration);
 
-        let mes = Self::build_request(input, request_json)?;
+        let mes = Self::build_request(input, request_json, spec.model.openai_model_id())?;
 
         let i_start = Instant::now();
         let result = model.generate(mes)?;

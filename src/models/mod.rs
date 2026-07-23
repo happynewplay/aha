@@ -78,6 +78,8 @@ pub enum WhichModel {
     Qwen3_0_6B,
     #[value(name = "lfm2.5-350m", hide = true)]
     LFM2_5_350M,
+    #[value(name = "lfm2.5-230m", hide = true)]
+    LFM2_5_230M,
     #[value(name = "lfm2.5-embedding-350m", hide = true)]
     LFM2_5Embedding350M,
     #[value(name = "mxbai-embed-xsmall-v1", hide = true)]
@@ -163,6 +165,7 @@ pub const LISTED_MODELS: &[WhichModel] = &[
     WhichModel::Qwen2_5vl7B,
     WhichModel::Qwen3_0_6B,
     WhichModel::LFM2_5_350M,
+    WhichModel::LFM2_5_230M,
     WhichModel::LFM2_5Embedding350M,
     WhichModel::MxbaiEmbedXsmallV1,
     WhichModel::AllMiniLML6V2,
@@ -222,6 +225,7 @@ impl WhichModel {
             self,
             WhichModel::AllMiniLML6V2
                 | WhichModel::LFM2_5_350M
+                | WhichModel::LFM2_5_230M
                 | WhichModel::LFM2_5Embedding350M
                 | WhichModel::MxbaiEmbedXsmallV1
         ) && !matches!(
@@ -238,6 +242,7 @@ impl WhichModel {
             WhichModel::Qwen2_5vl7B => "qwen2.5vl-7b",
             WhichModel::Qwen3_0_6B => "qwen3-0.6b",
             WhichModel::LFM2_5_350M => "lfm2.5-350m",
+            WhichModel::LFM2_5_230M => "lfm2.5-230m",
             WhichModel::LFM2_5Embedding350M => "lfm2.5-embedding-350m",
             WhichModel::MxbaiEmbedXsmallV1 => "mxbai-embed-xsmall-v1",
             WhichModel::AllMiniLML6V2 => "all-minilm-l6-v2",
@@ -294,7 +299,7 @@ impl WhichModel {
             | WhichModel::Qwen3Reranker8B
             | WhichModel::Qwen3ASR0_6B
             | WhichModel::Qwen3ASR1_7B => "Qwen",
-            WhichModel::LFM2_5_350M => "LiquidAI",
+            WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => "LiquidAI",
             WhichModel::LFM2_5Embedding350M => "LiquidAI",
             WhichModel::MxbaiEmbedXsmallV1 => "mixedbread-ai",
             WhichModel::Qwen3vl2B
@@ -332,6 +337,7 @@ impl WhichModel {
             WhichModel::Qwen2_5vl7B => "Qwen/Qwen2.5-VL-7B-Instruct",
             WhichModel::Qwen3_0_6B => "Qwen/Qwen3-0.6B",
             WhichModel::LFM2_5_350M => "LiquidAI/LFM2.5-350M",
+            WhichModel::LFM2_5_230M => "LiquidAI/LFM2.5-230M",
             WhichModel::LFM2_5Embedding350M => "LiquidAI/LFM2.5-Embedding-350M",
             WhichModel::MxbaiEmbedXsmallV1 => "mixedbread-ai/mxbai-embed-xsmall-v1",
             WhichModel::AllMiniLML6V2 => "sentence-transformers/all-MiniLM-L6-v2",
@@ -378,7 +384,7 @@ impl WhichModel {
         match self {
             // LLM models
             WhichModel::MiniCPM4_0_5B | WhichModel::MiniCPM5_1B | WhichModel::Qwen3_0_6B => "llm",
-            WhichModel::LFM2_5_350M => "llm",
+            WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => "llm",
             WhichModel::LFM2_5Embedding350M | WhichModel::MxbaiEmbedXsmallV1 => "embedding",
             WhichModel::AllMiniLML6V2
             | WhichModel::Qwen3Embedding0_6B
@@ -631,7 +637,7 @@ pub fn load_model_legacy<'a>(
             let model = Qwen3GenerateModel::init(path, None, None)?;
             ModelInstance::Qwen3(model)
         }
-        WhichModel::LFM2_5_350M => {
+        WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => {
             let model = Lfm2_5GenerateModel::init(path, None, None)?;
             ModelInstance::LFM2_5(model)
         }

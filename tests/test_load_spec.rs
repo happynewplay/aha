@@ -1,4 +1,30 @@
-use aha::models::{ArtifactKind, LoadSpec, ModelPaths, WhichModel};
+use aha::models::{
+    ArtifactKind, LoadSpec, ModelPaths, WhichModel, default_artifact, supported_artifacts,
+};
+use clap::ValueEnum;
+
+#[test]
+fn load_spec_accepts_lfm2_5_230m_artifacts() {
+    let model = WhichModel::from_str("lfm2.5-230m", true).unwrap();
+
+    assert_eq!(model.openai_model_id(), "lfm2.5-230m");
+    assert_eq!(model.owner(), "LiquidAI");
+    assert!(!model.is_download_managed());
+    assert_eq!(default_artifact(model), ArtifactKind::Safetensors);
+    assert_eq!(
+        supported_artifacts(model),
+        &[
+            ArtifactKind::Safetensors,
+            ArtifactKind::Gguf,
+            ArtifactKind::Onnx
+        ]
+    );
+    assert!(
+        LoadSpec::for_safetensors(model, "D:/model_download/LFM2.5-230M")
+            .validate()
+            .is_ok()
+    );
+}
 
 #[test]
 fn load_spec_auto_resolves_to_safetensors_default() {

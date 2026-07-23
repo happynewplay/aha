@@ -417,7 +417,7 @@ pub struct Lfm2_5Model {
 impl Lfm2_5Model {
     pub fn new_from_vb(vb: VarBuilder, cfg: &Lfm2_5Config) -> Result<Self> {
         let language_model = Lfm2_5TextModel::new_from_vb(vb.pp("model"), cfg)?;
-        let lm_head = if cfg.tie_embedding {
+        let lm_head = if cfg.tied_embeddings() {
             Linear::new(language_model.embed_tokens.embeddings().clone(), None)
         } else {
             linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
@@ -638,7 +638,7 @@ fn load_lfm2_5_gguf_tensors<R: std::io::Read + std::io::Seek>(
         }
     }
 
-    if !cfg.tie_embedding && gguf.has_tensor("output.weight") {
+    if !cfg.tied_embeddings() && gguf.has_tensor("output.weight") {
         insert_gguf_tensor(
             gguf,
             &mut tensors,

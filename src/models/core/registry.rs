@@ -32,7 +32,7 @@ fn resolve_model_loader_family(model: WhichModel) -> ModelLoaderFamily {
     match model {
         WhichModel::AllMiniLML6V2 => ModelLoaderFamily::AllMiniLML6V2,
         WhichModel::MiniCPM5_1B => ModelLoaderFamily::MiniCPM5,
-        WhichModel::LFM2_5_350M => ModelLoaderFamily::LFM2_5,
+        WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => ModelLoaderFamily::LFM2_5,
         WhichModel::LFM2_5Embedding350M => ModelLoaderFamily::LFM2_5Embedding,
         WhichModel::MxbaiEmbedXsmallV1 => ModelLoaderFamily::MxbaiEmbedXsmallV1,
         WhichModel::GlmOCR => ModelLoaderFamily::GlmOCR,

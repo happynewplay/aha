@@ -559,9 +559,10 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
     if args.request_json.is_some()
         && args.model != WhichModel::MiniCPM5_1B
         && args.model != WhichModel::LFM2_5_350M
+        && args.model != WhichModel::LFM2_5_230M
     {
         return Err(anyhow!(
-            "--request-json is only supported for minicpm5-1b and lfm2.5-350m"
+            "--request-json is only supported for minicpm5-1b and lfm2.5 models"
         ));
     }
     match args.model {
@@ -619,7 +620,7 @@ fn run_target_model_with_spec(args: &RunArgs, spec: &LoadSpec) -> anyhow::Result
             Qwen3_5Exec::run_with_spec(&args.input, args.output.as_deref(), spec)?;
             Ok(true)
         }
-        WhichModel::LFM2_5_350M => {
+        WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => {
             use aha::exec::lfm2_5::Lfm2_5Exec;
             Lfm2_5Exec::run_with_spec(
                 &args.input,
@@ -963,6 +964,7 @@ fn run_run(args: RunArgs) -> anyhow::Result<()> {
         | WhichModel::Qwen3_5_2BLmstudioGguf
         | WhichModel::Qwen3_5_4BLmstudioGguf
         | WhichModel::LFM2_5_350M
+        | WhichModel::LFM2_5_230M
         | WhichModel::LFM2_5Embedding350M
         | WhichModel::MxbaiEmbedXsmallV1
         | WhichModel::Yolo11Detect => unreachable!(

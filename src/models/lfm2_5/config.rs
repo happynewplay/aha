@@ -66,8 +66,9 @@ pub struct Lfm2_5Config {
     pub norm_eps: f64,
     pub pad_token_id: u32,
     pub rope_parameters: RopeParameters,
-    #[serde(alias = "tie_word_embeddings")]
     pub tie_embedding: bool,
+    #[serde(default)]
+    pub tie_word_embeddings: Option<bool>,
     pub use_cache: bool,
     pub use_pos_enc: bool,
     pub vocab_size: usize,
@@ -87,6 +88,10 @@ impl Lfm2_5Config {
             * (2.0_f64 / 3.0_f64)
             * self.block_ffn_dim_multiplier as f64;
         round_up_to_multiple(scaled.ceil() as usize, self.block_multiple_of)
+    }
+
+    pub fn tied_embeddings(&self) -> bool {
+        self.tie_word_embeddings.unwrap_or(self.tie_embedding)
     }
 }
 

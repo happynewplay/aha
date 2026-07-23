@@ -5,75 +5,80 @@ use minijinja::{Environment, Value as MiniJinjaValue, context};
 use crate::utils::{extract_metadata_value, string_to_static_str};
 
 pub fn fix_template(chat_template: &str) -> String {
-    chat_template
-        .replace(
-            "content.startswith('<tool_response>')",
-            "content is startingwith('<tool_response>')", // 使用minijinja中的 is startingwith 替换
-        )
-        .replace(
-            "content.startswith(\"<tool_response>\")",
-            "content is startingwith(\"<tool_response>\")",
-        )
-        .replace(
-            "content.endswith('</tool_response>')",
-            "content is endingwith('</tool_response>')", // 使用minijinja中的 is endingwith 替换
-        )
-        .replace(
-            "content.endswith(\"</tool_response>\")",
-            "content is endingwith(\"</tool_response>\")",
-        )
-        .replace(
-            "content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n')",
-            "((content | split('</think>'))[0] | rstrip('\\n') | split('<think>'))[-1] | lstrip('\\n')", // 使用自定义的split, rstrip, lstrip过滤器替换
-        )
-        .replace(
-            "content.split(\"</think>\")[0].rstrip(\"\\n\").split(\"<think>\")[-1].lstrip(\"\\n\")",
-            "((content | split('</think>'))[0] | rstrip('\\n') | split('<think>'))[-1] | lstrip('\\n')",
-        )
-        .replace(
-            "content.split('</think>')[-1].lstrip('\\n')",
-            "(content | split('</think>'))[-1] | lstrip('\\n')", // 使用自定义的过滤器替换
-        )
-        .replace(
-            "content.split(\"</think>\")[-1].lstrip(\"\\n\")",
-            "(content | split('</think>'))[-1] | lstrip('\\n')",
-        )
-        .replace(
-            "reasoning_content.strip('\\n')",
-            "reasoning_content | strip('\\n')", // 使用自定义的过滤器替换
-        )
-        .replace(
-            "reasoning_content.strip(\"\\n\")",
-            "reasoning_content | strip('\\n')",
-        )
-        .replace(
-            "message.tool_calls and not has_tool_sep",
-            "message.tool_calls and not (content_parts|length > 1)",
-        )
-        .replace(
-            "tool_definitions.lstrip()",
-            "tool_definitions | lstrip",
-        )
-        .replace(
-            "content.lstrip('\\n')",
-            "content | lstrip('\\n')", // 使用自定义的过滤器替换
-        )
-        .replace(
-            "content.lstrip(\"\\n\")",
-            "content | lstrip('\\n')",
-        )
-        .replace(
-            "content.split('<tool_sep>')",
-            "content | split('<tool_sep>')",
-        )
-        .replace(
-            "content.split(\"<tool_sep>\")",
-            "content | split(\"<tool_sep>\")",
-        )
-        .replace(
-            "args_dict.items()",
-            "args_dict | fromjson | items",
-        )
+    [
+        "{% generation %}",
+        "{%- generation %}",
+        "{% generation -%}",
+        "{%- generation -%}",
+        "{% endgeneration %}",
+        "{%- endgeneration %}",
+        "{% endgeneration -%}",
+        "{%- endgeneration -%}",
+    ]
+    .into_iter()
+    .fold(chat_template.to_string(), |template, tag| {
+        template.replace(tag, "")
+    })
+    .replace(".get(\"content\")", "[\"content\"] | default(false)")
+    .replace(
+        "content.startswith('<tool_response>')",
+        "content is startingwith('<tool_response>')", // 使用minijinja中的 is startingwith 替换
+    )
+    .replace(
+        "content.startswith(\"<tool_response>\")",
+        "content is startingwith(\"<tool_response>\")",
+    )
+    .replace(
+        "content.endswith('</tool_response>')",
+        "content is endingwith('</tool_response>')", // 使用minijinja中的 is endingwith 替换
+    )
+    .replace(
+        "content.endswith(\"</tool_response>\")",
+        "content is endingwith(\"</tool_response>\")",
+    )
+    .replace(
+        "content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n')",
+        "((content | split('</think>'))[0] | rstrip('\\n') | split('<think>'))[-1] | lstrip('\\n')", // 使用自定义的split, rstrip, lstrip过滤器替换
+    )
+    .replace(
+        "content.split(\"</think>\")[0].rstrip(\"\\n\").split(\"<think>\")[-1].lstrip(\"\\n\")",
+        "((content | split('</think>'))[0] | rstrip('\\n') | split('<think>'))[-1] | lstrip('\\n')",
+    )
+    .replace(
+        "content.split('</think>')[-1].lstrip('\\n')",
+        "(content | split('</think>'))[-1] | lstrip('\\n')", // 使用自定义的过滤器替换
+    )
+    .replace(
+        "content.split(\"</think>\")[-1].lstrip(\"\\n\")",
+        "(content | split('</think>'))[-1] | lstrip('\\n')",
+    )
+    .replace(
+        "reasoning_content.strip('\\n')",
+        "reasoning_content | strip('\\n')", // 使用自定义的过滤器替换
+    )
+    .replace(
+        "reasoning_content.strip(\"\\n\")",
+        "reasoning_content | strip('\\n')",
+    )
+    .replace(
+        "message.tool_calls and not has_tool_sep",
+        "message.tool_calls and not (content_parts|length > 1)",
+    )
+    .replace("tool_definitions.lstrip()", "tool_definitions | lstrip")
+    .replace(
+        "content.lstrip('\\n')",
+        "content | lstrip('\\n')", // 使用自定义的过滤器替换
+    )
+    .replace("content.lstrip(\"\\n\")", "content | lstrip('\\n')")
+    .replace(
+        "content.split('<tool_sep>')",
+        "content | split('<tool_sep>')",
+    )
+    .replace(
+        "content.split(\"<tool_sep>\")",
+        "content | split(\"<tool_sep>\")",
+    )
+    .replace("args_dict.items()", "args_dict | fromjson | items")
 }
 
 pub fn get_template(path: String) -> Result<String> {
@@ -173,7 +178,8 @@ impl<'a> ChatTemplate<'a> {
         // 加载jinjaenv处理chat_template
         let mut env = Environment::new();
         Self::setup_environment(&mut env);
-        let _ = env.add_template("chat", template);
+        env.add_template("chat", template)
+            .map_err(|e| anyhow!("parse chat template error: {e}"))?;
 
         Ok(Self { env })
     }
@@ -184,7 +190,8 @@ impl<'a> ChatTemplate<'a> {
         // 加载jinjaenv处理chat_template
         let mut env = Environment::new();
         Self::setup_environment(&mut env);
-        let _ = env.add_template("chat", template);
+        env.add_template("chat", template)
+            .map_err(|e| anyhow!("parse chat template error: {e}"))?;
 
         Ok(Self { env })
     }

@@ -74,7 +74,7 @@ impl<'a> Lfm2_5GenerateModel<'a> {
         device: Option<&Device>,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        match spec.resolved_artifact() {
+        let mut model = match spec.resolved_artifact() {
             ArtifactKind::Safetensors => {
                 let path = spec.paths.weight_dir.as_deref().ok_or_else(|| {
                     anyhow!("weight_path is required for lfm2.5-350m safetensors")
@@ -98,7 +98,9 @@ impl<'a> Lfm2_5GenerateModel<'a> {
                 Self::init_from_onnx(onnx_path, spec.paths.tokenizer_dir.as_deref())
             }
             ArtifactKind::Auto => unreachable!("artifact kind should be resolved before init"),
-        }
+        }?;
+        model.model_name = spec.model.openai_model_id().to_string();
+        Ok(model)
     }
 
     pub fn init(path: &str, device: Option<&Device>, dtype: Option<DType>) -> Result<Self> {

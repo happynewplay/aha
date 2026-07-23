@@ -35,7 +35,7 @@ pub fn supported_artifacts(model: WhichModel) -> &'static [ArtifactKind] {
             ArtifactKind::Gguf,
             ArtifactKind::Onnx,
         ],
-        WhichModel::LFM2_5_350M => &[
+        WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => &[
             ArtifactKind::Safetensors,
             ArtifactKind::Gguf,
             ArtifactKind::Onnx,
@@ -97,7 +97,9 @@ pub fn default_artifact(model: WhichModel) -> ArtifactKind {
         WhichModel::Yolo11Detect => ArtifactKind::Onnx,
         WhichModel::LFM2_5Embedding350M => ArtifactKind::Safetensors,
         WhichModel::MxbaiEmbedXsmallV1 => ArtifactKind::Safetensors,
-        WhichModel::MiniCPM5_1B | WhichModel::LFM2_5_350M => ArtifactKind::Safetensors,
+        WhichModel::MiniCPM5_1B | WhichModel::LFM2_5_350M | WhichModel::LFM2_5_230M => {
+            ArtifactKind::Safetensors
+        }
         _ => ArtifactKind::Safetensors,
     }
 }
